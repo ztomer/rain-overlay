@@ -1,0 +1,1 @@
+swiftc -framework Cocoa -framework Metal -framework MetalKit rain-overlay.swift
