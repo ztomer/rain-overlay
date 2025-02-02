@@ -16,10 +16,12 @@ struct RainSettings: Codable {
     var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.3 = 30% intensity)
     var windEnabled: Bool  // Whether wind is enabled
     var windIntensity: Float  // Maximum random delta for wind (very gentle by default)
+    var mouseEnabled: Bool  // Whether the rain reacts to the mouse
+    var mouseInfluenceIntensity: Float  // How strongly the mouse influences the rain
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity, windEnabled,
-            windIntensity
+            windIntensity, mouseEnabled, mouseInfluenceIntensity
     }
 
     // NSColor isn’t directly Codable – we encode its RGBA components.
@@ -29,7 +31,8 @@ struct RainSettings: Codable {
 
     init(
         numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float,
-        smearFactor: Float, splashIntensity: Float, windEnabled: Bool, windIntensity: Float
+        smearFactor: Float, splashIntensity: Float, windEnabled: Bool, windIntensity: Float,
+        mouseEnabled: Bool, mouseInfluenceIntensity: Float
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -40,6 +43,8 @@ struct RainSettings: Codable {
         self.splashIntensity = splashIntensity
         self.windEnabled = windEnabled
         self.windIntensity = windIntensity
+        self.mouseEnabled = mouseEnabled
+        self.mouseInfluenceIntensity = mouseInfluenceIntensity
     }
 
     init(from decoder: Decoder) throws {
@@ -52,6 +57,8 @@ struct RainSettings: Codable {
         splashIntensity = try container.decode(Float.self, forKey: .splashIntensity)
         windEnabled = try container.decode(Bool.self, forKey: .windEnabled)
         windIntensity = try container.decode(Float.self, forKey: .windIntensity)
+        mouseEnabled = try container.decode(Bool.self, forKey: .mouseEnabled)
+        mouseInfluenceIntensity = try container.decode(Float.self, forKey: .mouseInfluenceIntensity)
         let comps = try container.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
             calibratedRed: comps.red,
@@ -70,6 +77,8 @@ struct RainSettings: Codable {
         try container.encode(splashIntensity, forKey: .splashIntensity)
         try container.encode(windEnabled, forKey: .windEnabled)
         try container.encode(windIntensity, forKey: .windIntensity)
+        try container.encode(mouseEnabled, forKey: .mouseEnabled)
+        try container.encode(mouseInfluenceIntensity, forKey: .mouseInfluenceIntensity)
         var red: CGFloat = 0
         var green: CGFloat = 0
         var blue: CGFloat = 0
@@ -122,9 +131,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.backgroundColor = NSColor.clear
 
         if let device = MTLCreateSystemDefaultDevice() {
-            // Default settings: 200 drops, speed 0.005 (slow), angle 30° (rain from left), white color,
+            // Default settings:
+            // 200 drops, speed 0.005 (slow), angle 30° (rain from left), white rain color,
             // drop length 0.05, smearFactor 4.0, splashIntensity 0.3,
-            // wind enabled with very gentle intensity (default 0.0001).
+            // wind enabled with a very gentle intensity (default 0.0001),
+            // mouse influence disabled by default.
             let defaultSettings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.005,
@@ -134,7 +145,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 smearFactor: 4.0,
                 splashIntensity: 0.3,
                 windEnabled: true,
-                windIntensity: 0.0001
+                windIntensity: 0.0001,
+                mouseEnabled: false,
+                mouseInfluenceIntensity: 0.001
             )
             rainView = RainView(
                 frame: window.contentView!.bounds, device: device, settings: defaultSettings)
@@ -189,6 +202,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSMenuItem(
                 title: "Decrease Wind Intensity", action: #selector(decreaseWindIntensity),
                 keyEquivalent: "f"))
+        menu.addItem(
+            NSMenuItem(
+                title: "Toggle Mouse Influence", action: #selector(toggleMouseInfluence),
+                keyEquivalent: "m"))
+        menu.addItem(
+            NSMenuItem(
+                title: "Increase Mouse Influence", action: #selector(increaseMouseInfluence),
+                keyEquivalent: "r"))
+        menu.addItem(
+            NSMenuItem(
+                title: "Decrease Mouse Influence", action: #selector(decreaseMouseInfluence),
+                keyEquivalent: "t"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(
             NSMenuItem(title: "Save Config", action: #selector(saveConfig), keyEquivalent: "o"))
@@ -272,6 +297,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         print("Wind intensity: \(rainView.settings.windIntensity)")
     }
 
+    @objc func toggleMouseInfluence() {
+        rainView.settings.mouseEnabled.toggle()
+        print("Mouse influence enabled: \(rainView.settings.mouseEnabled)")
+    }
+
+    @objc func increaseMouseInfluence() {
+        rainView.settings.mouseInfluenceIntensity += 0.0005
+        print("Mouse influence intensity: \(rainView.settings.mouseInfluenceIntensity)")
+    }
+
+    @objc func decreaseMouseInfluence() {
+        rainView.settings.mouseInfluenceIntensity = max(
+            0.0, rainView.settings.mouseInfluenceIntensity - 0.0005)
+        print("Mouse influence intensity: \(rainView.settings.mouseInfluenceIntensity)")
+    }
+
     @objc func saveConfig() {
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [UTType.json]
@@ -351,7 +392,7 @@ class RainView: MTKView {
         var position: SIMD2<Float>
         var speed: Float
         var length: Float
-        var isSpecial: Bool  // If true, this drop slows down and leaves a smear.
+        var isSpecial: Bool  // If true, slows down and leaves a smear.
     }
 
     struct Splash {
@@ -373,7 +414,7 @@ class RainView: MTKView {
         }
     }
 
-    // Uniforms for the shader.
+    // Uniforms for shader.
     struct RainUniforms {
         var rainColor: SIMD4<Float>
         var ambientColor: SIMD4<Float>
@@ -493,10 +534,8 @@ class RainView: MTKView {
 
     private func updateEnvironment() {
         if settings.windEnabled {
-            // Update wind using the (even lower) windIntensity.
             wind += Float.random(in: -settings.windIntensity...settings.windIntensity)
             wind = min(max(wind, -0.003), 0.003)
-            // Only update the rain angle with a 10% chance per frame.
             if Float.random(in: 0...1) < 0.1 {
                 settings.angle += wind * 30
                 settings.angle = min(max(settings.angle, -85), 85)
@@ -504,6 +543,9 @@ class RainView: MTKView {
         } else {
             wind = 0
         }
+
+        // Mouse influence is applied per-drop in the draw() loop.
+
         time += 0.016
         ambientColor = SIMD4<Float>(
             0.05 + 0.01 * sin(time * 0.05),
@@ -572,8 +614,23 @@ class RainView: MTKView {
         for i in 0..<raindrops.count {
             let effectiveSpeed =
                 raindrops[i].isSpecial ? raindrops[i].speed * 0.5 : raindrops[i].speed
-            let dx = sin(currentAngle) * effectiveSpeed + wind
+            var dx = sin(currentAngle) * effectiveSpeed + wind
             let dy = -cos(currentAngle) * effectiveSpeed
+
+            // If mouse influence is enabled, add a gentle force toward the mouse.
+            if settings.mouseEnabled {
+                let globalMouse = NSEvent.mouseLocation
+                if let screen = NSScreen.main {
+                    let frame = screen.frame
+                    let normX = ((globalMouse.x - frame.origin.x) / frame.width) * 2 - 1
+                    let normY = ((globalMouse.y - frame.origin.y) / frame.height) * 2 - 1
+                    let mousePos = SIMD2<Float>(Float(normX), Float(normY))
+                    let diff = mousePos - raindrops[i].position
+                    let influence = diff * settings.mouseInfluenceIntensity
+                    dx += influence.x
+                }
+            }
+
             raindrops[i].position.x += dx
             raindrops[i].position.y += dy
 
