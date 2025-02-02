@@ -8,23 +8,23 @@ import simd
 
 struct RainSettings: Codable {
     var numberOfDrops: Int
-    var speed: Float  // Base speed for raindrops
-    var angle: Float  // In degrees; positive means rain comes from the left.
+    var speed: Float
+    var angle: Float
     var color: NSColor
-    var length: Float  // Base length for raindrops (short drops)
-    var smearFactor: Float  // Multiplier for the trailing smear (only for special drops)
-    var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.3 = 30% intensity)
-    var windEnabled: Bool  // Whether wind is enabled
-    var windIntensity: Float  // Maximum random delta for wind (very gentle by default)
-    var mouseEnabled: Bool  // Whether the rain reacts to the mouse
-    var mouseInfluenceIntensity: Float  // How strongly the mouse influences the rain
+    var length: Float
+    var smearFactor: Float
+    var splashIntensity: Float
+    var windEnabled: Bool
+    var windIntensity: Float
+    var mouseEnabled: Bool
+    var mouseInfluenceIntensity: Float
+    var maxFPS: Int  // New property for limiting FPS
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity, windEnabled,
-            windIntensity, mouseEnabled, mouseInfluenceIntensity
+            windIntensity, mouseEnabled, mouseInfluenceIntensity, maxFPS
     }
 
-    // NSColor isn’t directly Codable – we encode its RGBA components.
     struct ColorComponents: Codable {
         var red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat
     }
@@ -32,7 +32,7 @@ struct RainSettings: Codable {
     init(
         numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float,
         smearFactor: Float, splashIntensity: Float, windEnabled: Bool, windIntensity: Float,
-        mouseEnabled: Bool, mouseInfluenceIntensity: Float
+        mouseEnabled: Bool, mouseInfluenceIntensity: Float, maxFPS: Int = 30  // Default FPS
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -45,6 +45,7 @@ struct RainSettings: Codable {
         self.windIntensity = windIntensity
         self.mouseEnabled = mouseEnabled
         self.mouseInfluenceIntensity = mouseInfluenceIntensity
+        self.maxFPS = maxFPS
     }
 
     init(from decoder: Decoder) throws {
@@ -59,6 +60,7 @@ struct RainSettings: Codable {
         windIntensity = try container.decode(Float.self, forKey: .windIntensity)
         mouseEnabled = try container.decode(Bool.self, forKey: .mouseEnabled)
         mouseInfluenceIntensity = try container.decode(Float.self, forKey: .mouseInfluenceIntensity)
+        maxFPS = try container.decodeIfPresent(Int.self, forKey: .maxFPS) ?? 30  // Default if not present
         let comps = try container.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
             calibratedRed: comps.red,
@@ -79,6 +81,8 @@ struct RainSettings: Codable {
         try container.encode(windIntensity, forKey: .windIntensity)
         try container.encode(mouseEnabled, forKey: .mouseEnabled)
         try container.encode(mouseInfluenceIntensity, forKey: .mouseInfluenceIntensity)
+        try container.encode(maxFPS, forKey: .maxFPS)
+
         var red: CGFloat = 0
         var green: CGFloat = 0
         var blue: CGFloat = 0
@@ -367,8 +371,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - RainView
 
 class RainView: MTKView {
-
-    var settings: RainSettings
+    var settings: RainSettings {
+        didSet {
+            self.preferredFramesPerSecond = settings.maxFPS
+        }
+    }
 
     private var commandQueue: MTLCommandQueue!
     private var pipelineState: MTLRenderPipelineState!
@@ -464,6 +471,7 @@ class RainView: MTKView {
         self.settings = settings
         super.init(frame: frameRect, device: device)
 
+        self.preferredFramesPerSecond = settings.maxFPS  // Apply FPS setting
         self.commandQueue = device.makeCommandQueue()
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         self.colorPixelFormat = .bgra8Unorm
@@ -472,7 +480,6 @@ class RainView: MTKView {
         setupPipeline()
         createRaindrops()
 
-        self.preferredFramesPerSecond = 60
         self.enableSetNeedsDisplay = true
         self.isPaused = false
     }
