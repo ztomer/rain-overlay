@@ -2,6 +2,8 @@
 
 * Super simple rain overlay for MacOs.
 * Generates animated rain on your desktop.
+
+## Features
 * Wind gusts!
 * Mouse events! (toggle-able, treats mouse movements as gusts of wind)
 * Splashes!
