@@ -12,7 +12,7 @@ struct RainSettings: Codable {
     var angle: Float  // In degrees; positive means rain comes from the left.
     var color: NSColor
     var length: Float  // Base length for raindrops (short drops)
-    var smearFactor: Float  // Multiplier for the trailing smear (only used for special drops)
+    var smearFactor: Float  // Multiplier for the trailing smear (only for special drops)
     var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.5 = 50% intensity)
 
     enum CodingKeys: String, CodingKey {
@@ -106,10 +106,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.backgroundColor = NSColor.clear
 
         if let device = MTLCreateSystemDefaultDevice() {
-            // Default settings:
-            // 200 drops, speed 0.01, angle 30° (rain from left),
-            // white color, drop length 0.05, smearFactor 4.0,
-            // splashIntensity 0.5.
+            // Default settings: 200 drops, speed 0.01, angle 30° (rain from left),
+            // white color, drop length 0.05, smearFactor 4.0, splashIntensity 0.5.
             let defaultSettings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.01,
@@ -324,7 +322,7 @@ class RainView: MTKView {
 
         var alpha: Float {
             let norm = max(life / startLife, 0)
-            return norm * norm  // squared fade-out for smooth fade
+            return norm * norm  // squared fade-out
         }
     }
 
@@ -398,43 +396,55 @@ class RainView: MTKView {
         }
     }
 
+    // MARK: - Random Drop Position
+
+    /// Returns a new random drop position based on the view's aspect ratio.
+    /// If a random number is less than pTop (computed from the aspect ratio), the drop appears from the top;
+    /// otherwise, it appears from the side (left if angle>0, right if angle<0).
+    private func newDropPosition() -> SIMD2<Float> {
+        // If angle is significant (>15 degrees), favor side spawning
+        let useAngleBias = abs(settings.angle) > 15
+
+        let spawnFromSide: Bool
+        if useAngleBias {
+            // When angle is significant, 70% chance to spawn from side
+            spawnFromSide = Float.random(in: 0...1) > 0.3
+        } else {
+            // Original aspect-based calculation for more vertical rain
+            let aspect = Float(self.bounds.width / self.bounds.height)
+            let pTop = 1 / (1 + aspect)
+            spawnFromSide = Float.random(in: 0...1) > pTop
+        }
+
+        if !spawnFromSide {
+            // Top drop: x in [-1, 1], y = 1
+            let x = Float.random(in: -1...1)
+            return SIMD2<Float>(x, 1)
+        } else {
+            // Side drop
+            let x: Float
+            if settings.angle > 0 {
+                x = Float.random(in: -1 ... -0.8)  // Left side
+            } else if settings.angle < 0 {
+                x = Float.random(in: 0.8...1)  // Right side
+            } else {
+                x = Float.random(in: -1...1)  // Random for vertical rain
+            }
+            // For side drops, randomize y position
+            let y = Float.random(in: -1...1)
+            return SIMD2<Float>(x, y)
+        }
+    }
+
     // MARK: - Create Raindrops
 
     func createRaindrops() {
         raindrops.removeAll()
-        // Distribute drops based on rain angle.
         for _ in 0..<settings.numberOfDrops {
-            let source: String
-            if settings.angle > 0 {
-                source = Bool.random() ? "top" : "side"
-            } else if settings.angle < 0 {
-                source = Bool.random() ? "top" : "side"
-            } else {
-                source = "top"
-            }
-            let initialX: Float
-            let initialY: Float
-            if source == "top" {
-                // From top: y = 1, x over full width.
-                initialX = Float.random(in: -1...1)
-                initialY = 1
-            } else {  // side
-                if settings.angle > 0 {
-                    // From left: x in [-1, -0.8]
-                    initialX = Float.random(in: -1 ... -0.8)
-                } else if settings.angle < 0 {
-                    // From right: x in [0.8, 1]
-                    initialX = Float.random(in: 0.8...1)
-                } else {
-                    initialX = Float.random(in: -1...1)
-                }
-                // For side drops, use full vertical range.
-                initialY = Float.random(in: -1...1)
-            }
-            // 1% chance to be "special" (drop that slows down and leaves a smear)
-            let special = Float.random(in: 0...1) < 0.01
+            let pos = newDropPosition()
+            let special = Float.random(in: 0...1) < 0.01  // 1% chance special (slows & smears)
             let drop = Raindrop(
-                position: SIMD2<Float>(initialX, initialY),
+                position: pos,
                 speed: Float.random(in: settings.speed...(settings.speed * 2)),
                 length: Float.random(in: settings.length...(settings.length * 2)),
                 isSpecial: special
@@ -446,7 +456,6 @@ class RainView: MTKView {
     // MARK: - Create Splash Particles
 
     private func createSplash(at position: SIMD2<Float>) {
-        // Create splashes when a drop hits the bottom.
         let count = Int.random(in: 3...5)
         for _ in 0..<count {
             let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
@@ -478,7 +487,7 @@ class RainView: MTKView {
 
         // --- Update and Render Raindrops ---
         for i in 0..<raindrops.count {
-            // Use a reduced speed if the drop is special.
+            // For special drops, use reduced speed.
             let effectiveSpeed =
                 raindrops[i].isSpecial ? raindrops[i].speed * 0.5 : raindrops[i].speed
             let dx = sin(currentAngle) * effectiveSpeed
@@ -486,45 +495,26 @@ class RainView: MTKView {
             raindrops[i].position.x += dx
             raindrops[i].position.y += dy
 
-            // If a drop falls below -1, create a splash and reset it.
-            if raindrops[i].position.y < -1 {
+            // Reset conditions
+            let shouldReset =
+                raindrops[i].position.y < -1 || raindrops[i].position.x < -1.2
+                || raindrops[i].position.x > 1.2
+
+            if shouldReset {
                 createSplash(at: raindrops[i].position)
-                // Reset drop using same distribution as creation.
-                let source: String
-                if settings.angle > 0 {
-                    source = Bool.random() ? "top" : "side"
-                } else if settings.angle < 0 {
-                    source = Bool.random() ? "top" : "side"
-                } else {
-                    source = "top"
-                }
-                let newX: Float
-                let newY: Float
-                if source == "top" {
-                    newX = Float.random(in: -1...1)
-                    newY = 1
-                } else {  // side
-                    if settings.angle > 0 {
-                        newX = Float.random(in: -1 ... -0.8)
-                    } else if settings.angle < 0 {
-                        newX = Float.random(in: 0.8...1)
-                    } else {
-                        newX = Float.random(in: -1...1)
-                    }
-                    newY = Float.random(in: -1...1)
-                }
+                let pos = newDropPosition()
                 let special = Float.random(in: 0...1) < 0.01
-                raindrops[i].position = SIMD2<Float>(newX, newY)
+                raindrops[i].position = pos
                 raindrops[i].isSpecial = special
+                // Reset the speed to a new random value
+                raindrops[i].speed = Float.random(in: settings.speed...(settings.speed * 2))
             }
 
             let dropDir = SIMD2<Float>(sin(currentAngle), -cos(currentAngle))
-            let dropLength = raindrops[i].length * 0.5  // much shorter drop segment
+            let dropLength = raindrops[i].length * 0.5  // very short drop segment
             let dropEnd = raindrops[i].position + dropDir * dropLength
-            // Add drop segment (full opacity).
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 1.0))
             raindropVertices.append(Vertex(position: dropEnd, alpha: 1.0))
-            // For special drops, add a trailing smear.
             if raindrops[i].isSpecial {
                 let smearLength = raindrops[i].length * settings.smearFactor
                 let smearEnd = raindrops[i].position + dropDir * smearLength
