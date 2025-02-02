@@ -392,7 +392,8 @@ class RainView: MTKView {
         var position: SIMD2<Float>
         var speed: Float
         var length: Float
-        var isSpecial: Bool  // If true, slows down and leaves a smear.
+        var isSpecial: Bool
+        var colorIntensity: Float  // New property for depth effect
     }
 
     struct Splash {
@@ -557,16 +558,30 @@ class RainView: MTKView {
 
     // MARK: - Create Raindrops
 
+    // Modify the createRaindrops function
     func createRaindrops() {
         raindrops.removeAll()
         for _ in 0..<settings.numberOfDrops {
             let pos = newDropPosition()
             let special = Float.random(in: 0...1) < 0.01
+
+            // Randomize length more dramatically
+            let lengthRange = settings.length * 0.5...settings.length * 2.0
+            let randomLength = Float.random(in: lengthRange)
+
+            // Calculate color intensity based on length
+            // Longer drops (closer) are brighter, shorter drops (far) are darker
+            let normalizedLength =
+                (randomLength - lengthRange.lowerBound)
+                / (lengthRange.upperBound - lengthRange.lowerBound)
+            let colorIntensity = 0.4 + (normalizedLength * 0.6)  // Range from 0.4 to 1.0
+
             let drop = Raindrop(
                 position: pos,
                 speed: Float.random(in: settings.speed...(settings.speed * 2)),
-                length: Float.random(in: settings.length...(settings.length * 2)),
-                isSpecial: special
+                length: randomLength,
+                isSpecial: special,
+                colorIntensity: colorIntensity
             )
             raindrops.append(drop)
         }
@@ -617,7 +632,7 @@ class RainView: MTKView {
             var dx = sin(currentAngle) * effectiveSpeed + wind
             let dy = -cos(currentAngle) * effectiveSpeed
 
-            // If mouse influence is enabled, add a gentle force toward the mouse.
+            // Mouse influence code remains the same
             if settings.mouseEnabled {
                 let globalMouse = NSEvent.mouseLocation
                 if let screen = NSScreen.main {
@@ -638,20 +653,36 @@ class RainView: MTKView {
                 createSplash(at: raindrops[i].position)
                 let pos = newDropPosition()
                 let special = Float.random(in: 0...1) < 0.01
+
+                // When resetting raindrop, also randomize length and color intensity
+                let lengthRange = settings.length * 0.5...settings.length * 2.0
+                let randomLength = Float.random(in: lengthRange)
+                let normalizedLength =
+                    (randomLength - lengthRange.lowerBound)
+                    / (lengthRange.upperBound - lengthRange.lowerBound)
+                let colorIntensity = 0.4 + (normalizedLength * 0.6)
+
                 raindrops[i].position = pos
                 raindrops[i].isSpecial = special
+                raindrops[i].length = randomLength
+                raindrops[i].colorIntensity = colorIntensity
             }
 
             let dropDir = SIMD2<Float>(sin(currentAngle), -cos(currentAngle))
             let dropLength = raindrops[i].length * 0.5
             let dropEnd = raindrops[i].position + dropDir * dropLength
-            raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 1.0))
-            raindropVertices.append(Vertex(position: dropEnd, alpha: 1.0))
+
+            // Apply color intensity to the alpha value
+            let dropAlpha = raindrops[i].colorIntensity
+            raindropVertices.append(Vertex(position: raindrops[i].position, alpha: dropAlpha))
+            raindropVertices.append(Vertex(position: dropEnd, alpha: dropAlpha))
+
             if raindrops[i].isSpecial {
                 let smearLength = raindrops[i].length * settings.smearFactor
                 let smearEnd = raindrops[i].position + dropDir * smearLength
-                raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 0.3))
-                raindropVertices.append(Vertex(position: smearEnd, alpha: 0.3))
+                let smearAlpha = raindrops[i].colorIntensity * 0.3
+                raindropVertices.append(Vertex(position: raindrops[i].position, alpha: smearAlpha))
+                raindropVertices.append(Vertex(position: smearEnd, alpha: smearAlpha))
             }
         }
 
