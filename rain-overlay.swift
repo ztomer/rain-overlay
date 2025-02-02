@@ -12,7 +12,7 @@ struct RainSettings: Codable {
     var angle: Float  // In degrees; positive means rain comes from the left.
     var color: NSColor
     var length: Float  // Base length for raindrops (short drops)
-    var smearFactor: Float  // Multiplier for the trailing smear
+    var smearFactor: Float  // Multiplier for the trailing smear (only used for special drops)
     var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.5 = 50% intensity)
 
     enum CodingKeys: String, CodingKey {
@@ -109,7 +109,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Default settings:
             // 200 drops, speed 0.01, angle 30° (rain from left),
             // white color, drop length 0.05, smearFactor 4.0,
-            // splashIntensity 0.5 (i.e., moderate splash effect).
+            // splashIntensity 0.5.
             let defaultSettings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.01,
@@ -293,7 +293,7 @@ class RainView: MTKView {
     private var raindrops: [Raindrop] = []
     private var splashes: [Splash] = []
 
-    // Compute current rain angle (radians) from settings.angle.
+    // Compute current rain angle (in radians) from settings.angle.
     private var currentAngle: Float {
         return settings.angle * .pi / 180.0
     }
@@ -304,6 +304,7 @@ class RainView: MTKView {
         var position: SIMD2<Float>
         var speed: Float
         var length: Float
+        var isSpecial: Bool  // If true, this drop slows down and leaves a smear.
     }
 
     // Splash particles using physics.
@@ -323,7 +324,7 @@ class RainView: MTKView {
 
         var alpha: Float {
             let norm = max(life / startLife, 0)
-            return norm * norm  // squared fade-out
+            return norm * norm  // squared fade-out for smooth fade
         }
     }
 
@@ -414,22 +415,29 @@ class RainView: MTKView {
             let initialX: Float
             let initialY: Float
             if source == "top" {
+                // From top: y = 1, x over full width.
                 initialX = Float.random(in: -1...1)
                 initialY = 1
             } else {  // side
                 if settings.angle > 0 {
-                    initialX = -1
+                    // From left: x in [-1, -0.8]
+                    initialX = Float.random(in: -1 ... -0.8)
                 } else if settings.angle < 0 {
-                    initialX = 1
+                    // From right: x in [0.8, 1]
+                    initialX = Float.random(in: 0.8...1)
                 } else {
                     initialX = Float.random(in: -1...1)
                 }
+                // For side drops, use full vertical range.
                 initialY = Float.random(in: -1...1)
             }
+            // 1% chance to be "special" (drop that slows down and leaves a smear)
+            let special = Float.random(in: 0...1) < 0.01
             let drop = Raindrop(
                 position: SIMD2<Float>(initialX, initialY),
                 speed: Float.random(in: settings.speed...(settings.speed * 2)),
-                length: Float.random(in: settings.length...(settings.length * 2))
+                length: Float.random(in: settings.length...(settings.length * 2)),
+                isSpecial: special
             )
             raindrops.append(drop)
         }
@@ -438,11 +446,11 @@ class RainView: MTKView {
     // MARK: - Create Splash Particles
 
     private func createSplash(at position: SIMD2<Float>) {
-        // Create splashes when a drop falls below -0.95.
+        // Create splashes when a drop hits the bottom.
         let count = Int.random(in: 3...5)
         for _ in 0..<count {
             let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
-            let speed = Float.random(in: 0.012...0.024)  // slightly increased speeds
+            let speed = Float.random(in: 0.012...0.024)
             let vel = SIMD2<Float>(
                 cos(randomAngle) * speed,
                 sin(randomAngle) * speed * 3.0  // enhanced vertical movement
@@ -470,16 +478,18 @@ class RainView: MTKView {
 
         // --- Update and Render Raindrops ---
         for i in 0..<raindrops.count {
-            // Update drop position.
-            let dx = sin(currentAngle) * raindrops[i].speed
-            let dy = -cos(currentAngle) * raindrops[i].speed
+            // Use a reduced speed if the drop is special.
+            let effectiveSpeed =
+                raindrops[i].isSpecial ? raindrops[i].speed * 0.5 : raindrops[i].speed
+            let dx = sin(currentAngle) * effectiveSpeed
+            let dy = -cos(currentAngle) * effectiveSpeed
             raindrops[i].position.x += dx
             raindrops[i].position.y += dy
 
-            // If drop falls below -1, create a splash and reset the drop.
+            // If a drop falls below -1, create a splash and reset it.
             if raindrops[i].position.y < -1 {
                 createSplash(at: raindrops[i].position)
-                // Reset drop using the same source distribution.
+                // Reset drop using same distribution as creation.
                 let source: String
                 if settings.angle > 0 {
                     source = Bool.random() ? "top" : "side"
@@ -495,31 +505,32 @@ class RainView: MTKView {
                     newY = 1
                 } else {  // side
                     if settings.angle > 0 {
-                        newX = -1
+                        newX = Float.random(in: -1 ... -0.8)
                     } else if settings.angle < 0 {
-                        newX = 1
+                        newX = Float.random(in: 0.8...1)
                     } else {
                         newX = Float.random(in: -1...1)
                     }
                     newY = Float.random(in: -1...1)
                 }
+                let special = Float.random(in: 0...1) < 0.01
                 raindrops[i].position = SIMD2<Float>(newX, newY)
+                raindrops[i].isSpecial = special
             }
 
             let dropDir = SIMD2<Float>(sin(currentAngle), -cos(currentAngle))
-            let dropLength = raindrops[i].length * 0.5  // much shorter drops
+            let dropLength = raindrops[i].length * 0.5  // much shorter drop segment
             let dropEnd = raindrops[i].position + dropDir * dropLength
-            // Add drop vertices (full opacity).
+            // Add drop segment (full opacity).
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 1.0))
             raindropVertices.append(Vertex(position: dropEnd, alpha: 1.0))
-            // For the trailing smear, randomize 1 in 100.
-            let isSpecialSmear = Float.random(in: 0...1) < 0.01
-            let effectiveSmearFactor =
-                isSpecialSmear ? settings.smearFactor * 0.5 : settings.smearFactor
-            let smearLength = raindrops[i].length * effectiveSmearFactor
-            let smearEnd = raindrops[i].position + dropDir * smearLength
-            raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 0.3))
-            raindropVertices.append(Vertex(position: smearEnd, alpha: 0.3))
+            // For special drops, add a trailing smear.
+            if raindrops[i].isSpecial {
+                let smearLength = raindrops[i].length * settings.smearFactor
+                let smearEnd = raindrops[i].position + dropDir * smearLength
+                raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 0.3))
+                raindropVertices.append(Vertex(position: smearEnd, alpha: 0.3))
+            }
         }
 
         // --- Update and Render Splashes ---
@@ -532,7 +543,7 @@ class RainView: MTKView {
             let mag = simd_length(v)
             let offset: SIMD2<Float>
             if mag > 0.0001 {
-                offset = (v / mag) * (0.1 * settings.splashIntensity)  // use 0.1 now
+                offset = (v / mag) * (0.1 * settings.splashIntensity)
             } else {
                 offset = SIMD2<Float>(
                     0.1 * settings.splashIntensity, 0.1 * settings.splashIntensity)
