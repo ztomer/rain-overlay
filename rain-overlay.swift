@@ -13,10 +13,13 @@ struct RainSettings: Codable {
     var color: NSColor
     var length: Float  // Base length for raindrops (short drops)
     var smearFactor: Float  // Multiplier for the trailing smear (only for special drops)
-    var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.5 = 50% intensity)
+    var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.3 = 30% intensity)
+    var windEnabled: Bool  // Whether wind is enabled
+    var windIntensity: Float  // Maximum random delta for wind (very gentle by default)
 
     enum CodingKeys: String, CodingKey {
-        case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity
+        case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity, windEnabled,
+            windIntensity
     }
 
     // NSColor isn’t directly Codable – we encode its RGBA components.
@@ -26,7 +29,7 @@ struct RainSettings: Codable {
 
     init(
         numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float,
-        smearFactor: Float, splashIntensity: Float
+        smearFactor: Float, splashIntensity: Float, windEnabled: Bool, windIntensity: Float
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -35,6 +38,8 @@ struct RainSettings: Codable {
         self.length = length
         self.smearFactor = smearFactor
         self.splashIntensity = splashIntensity
+        self.windEnabled = windEnabled
+        self.windIntensity = windIntensity
     }
 
     init(from decoder: Decoder) throws {
@@ -45,6 +50,8 @@ struct RainSettings: Codable {
         length = try container.decode(Float.self, forKey: .length)
         smearFactor = try container.decode(Float.self, forKey: .smearFactor)
         splashIntensity = try container.decode(Float.self, forKey: .splashIntensity)
+        windEnabled = try container.decode(Bool.self, forKey: .windEnabled)
+        windIntensity = try container.decode(Float.self, forKey: .windIntensity)
         let comps = try container.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
             calibratedRed: comps.red,
@@ -61,6 +68,8 @@ struct RainSettings: Codable {
         try container.encode(length, forKey: .length)
         try container.encode(smearFactor, forKey: .smearFactor)
         try container.encode(splashIntensity, forKey: .splashIntensity)
+        try container.encode(windEnabled, forKey: .windEnabled)
+        try container.encode(windIntensity, forKey: .windIntensity)
         var red: CGFloat = 0
         var green: CGFloat = 0
         var blue: CGFloat = 0
@@ -71,6 +80,13 @@ struct RainSettings: Codable {
         let comps = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
         try container.encode(comps, forKey: .color)
     }
+}
+
+// MARK: - Uniforms
+
+struct RainUniforms {
+    var rainColor: SIMD4<Float>
+    var ambientColor: SIMD4<Float>
 }
 
 // MARK: - Vertex Structure
@@ -106,16 +122,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.backgroundColor = NSColor.clear
 
         if let device = MTLCreateSystemDefaultDevice() {
-            // Default settings: 200 drops, speed 0.01, angle 30° (rain from left),
-            // white color, drop length 0.05, smearFactor 4.0, splashIntensity 0.5.
+            // Default settings: 200 drops, speed 0.005 (slow), angle 30° (rain from left), white color,
+            // drop length 0.05, smearFactor 4.0, splashIntensity 0.3,
+            // wind enabled with very gentle intensity (default 0.0001).
             let defaultSettings = RainSettings(
                 numberOfDrops: 200,
-                speed: 0.01,
+                speed: 0.005,
                 angle: 30.0,
                 color: NSColor.white,
                 length: 0.05,
                 smearFactor: 4.0,
-                splashIntensity: 0.5
+                splashIntensity: 0.3,
+                windEnabled: true,
+                windIntensity: 0.0001
             )
             rainView = RainView(
                 frame: window.contentView!.bounds, device: device, settings: defaultSettings)
@@ -160,6 +179,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 title: "Decrease Length", action: #selector(decreaseLength), keyEquivalent: "k"))
         menu.addItem(
             NSMenuItem(title: "Change Color", action: #selector(changeColor), keyEquivalent: "c"))
+        menu.addItem(
+            NSMenuItem(title: "Toggle Wind", action: #selector(toggleWind), keyEquivalent: "w"))
+        menu.addItem(
+            NSMenuItem(
+                title: "Increase Wind Intensity", action: #selector(increaseWindIntensity),
+                keyEquivalent: "e"))
+        menu.addItem(
+            NSMenuItem(
+                title: "Decrease Wind Intensity", action: #selector(decreaseWindIntensity),
+                keyEquivalent: "f"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(
             NSMenuItem(title: "Save Config", action: #selector(saveConfig), keyEquivalent: "o"))
@@ -228,6 +257,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rainView.settings.color = sender.color
     }
 
+    @objc func toggleWind() {
+        rainView.settings.windEnabled.toggle()
+        print("Wind enabled: \(rainView.settings.windEnabled)")
+    }
+
+    @objc func increaseWindIntensity() {
+        rainView.settings.windIntensity += 0.0001
+        print("Wind intensity: \(rainView.settings.windIntensity)")
+    }
+
+    @objc func decreaseWindIntensity() {
+        rainView.settings.windIntensity = max(0.00005, rainView.settings.windIntensity - 0.0001)
+        print("Wind intensity: \(rainView.settings.windIntensity)")
+    }
+
     @objc func saveConfig() {
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [UTType.json]
@@ -291,6 +335,11 @@ class RainView: MTKView {
     private var raindrops: [Raindrop] = []
     private var splashes: [Splash] = []
 
+    // Wind and ambient environment.
+    private var wind: Float = 0.0
+    private var ambientColor: SIMD4<Float> = SIMD4<Float>(0.05, 0.05, 0.1, 1.0)
+    private var time: Float = 0.0
+
     // Compute current rain angle (in radians) from settings.angle.
     private var currentAngle: Float {
         return settings.angle * .pi / 180.0
@@ -305,24 +354,64 @@ class RainView: MTKView {
         var isSpecial: Bool  // If true, this drop slows down and leaves a smear.
     }
 
-    // Splash particles using physics.
     struct Splash {
         var position: SIMD2<Float>
         var velocity: SIMD2<Float>
-        var life: Float  // current life remaining
-        var startLife: Float  // for alpha calculation
+        var life: Float  // Current life remaining
+        var startLife: Float  // For alpha calculation
 
         mutating func update() {
-            // dt ≈ 0.016 at 60fps.
             life -= 0.016
-            velocity *= 0.99  // smoother drag
-            velocity.y -= 0.003  // reduced gravity
+            velocity *= 0.99
+            velocity.y -= 0.003
             position += velocity
         }
 
         var alpha: Float {
             let norm = max(life / startLife, 0)
-            return norm * norm  // squared fade-out
+            return norm * norm
+        }
+    }
+
+    // Uniforms for the shader.
+    struct RainUniforms {
+        var rainColor: SIMD4<Float>
+        var ambientColor: SIMD4<Float>
+    }
+
+    // Helper: Convert NSColor to SIMD4<Float>
+    private func simd4(from color: NSColor) -> SIMD4<Float> {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return SIMD4<Float>(1, 1, 1, 1) }
+        return SIMD4<Float>(
+            Float(rgb.redComponent), Float(rgb.greenComponent), Float(rgb.blueComponent),
+            Float(rgb.alphaComponent))
+    }
+
+    // New drop position helper – randomizes spawn location based on angle and aspect ratio.
+    private func newDropPosition() -> SIMD2<Float> {
+        let useAngleBias = abs(settings.angle) > 15
+        let spawnFromSide: Bool
+        if useAngleBias {
+            spawnFromSide = Float.random(in: 0...1) > 0.3  // 70% chance side
+        } else {
+            let aspect = Float(self.bounds.width / self.bounds.height)
+            let pTop = 1 / (1 + aspect)
+            spawnFromSide = Float.random(in: 0...1) > pTop
+        }
+        if !spawnFromSide {
+            let x = Float.random(in: -1...1)
+            return SIMD2<Float>(x, 1)
+        } else {
+            let x: Float
+            if settings.angle > 0 {
+                x = Float.random(in: -1 ... -0.8)
+            } else if settings.angle < 0 {
+                x = Float.random(in: 0.8...1)
+            } else {
+                x = Float.random(in: -1...1)
+            }
+            let y = Float.random(in: -1...1)
+            return SIMD2<Float>(x, y)
         }
     }
 
@@ -353,7 +442,6 @@ class RainView: MTKView {
 
     private func setupPipeline() {
         guard let device = self.device else { return }
-        // Shader using per-vertex alpha.
         let shaderSource = """
             #include <metal_stdlib>
             using namespace metal;
@@ -365,6 +453,10 @@ class RainView: MTKView {
                 float4 position [[position]];
                 float alpha;
             };
+            struct RainUniforms {
+                float4 rainColor;
+                float4 ambientColor;
+            };
             vertex VertexOut vertexShader(uint vertexID [[vertex_id]],
                                           const device Vertex *vertices [[buffer(0)]]) {
                 VertexOut out;
@@ -372,8 +464,9 @@ class RainView: MTKView {
                 out.alpha = vertices[vertexID].alpha;
                 return out;
             }
-            fragment float4 fragmentShader(VertexOut in [[stage_in]]) {
-                return float4(0.7, 0.7, 1.0, in.alpha * 0.3);
+            fragment float4 fragmentShader(VertexOut in [[stage_in]],
+                                            constant RainUniforms &uniforms [[buffer(1)]]) {
+                return (uniforms.rainColor * in.alpha + uniforms.ambientColor);
             }
             """
         do {
@@ -396,44 +489,28 @@ class RainView: MTKView {
         }
     }
 
-    // MARK: - Random Drop Position
+    // MARK: - Update Environment
 
-    /// Returns a new random drop position based on the view's aspect ratio.
-    /// If a random number is less than pTop (computed from the aspect ratio), the drop appears from the top;
-    /// otherwise, it appears from the side (left if angle>0, right if angle<0).
-    private func newDropPosition() -> SIMD2<Float> {
-        // If angle is significant (>15 degrees), favor side spawning
-        let useAngleBias = abs(settings.angle) > 15
-
-        let spawnFromSide: Bool
-        if useAngleBias {
-            // When angle is significant, 70% chance to spawn from side
-            spawnFromSide = Float.random(in: 0...1) > 0.3
-        } else {
-            // Original aspect-based calculation for more vertical rain
-            let aspect = Float(self.bounds.width / self.bounds.height)
-            let pTop = 1 / (1 + aspect)
-            spawnFromSide = Float.random(in: 0...1) > pTop
-        }
-
-        if !spawnFromSide {
-            // Top drop: x in [-1, 1], y = 1
-            let x = Float.random(in: -1...1)
-            return SIMD2<Float>(x, 1)
-        } else {
-            // Side drop
-            let x: Float
-            if settings.angle > 0 {
-                x = Float.random(in: -1 ... -0.8)  // Left side
-            } else if settings.angle < 0 {
-                x = Float.random(in: 0.8...1)  // Right side
-            } else {
-                x = Float.random(in: -1...1)  // Random for vertical rain
+    private func updateEnvironment() {
+        if settings.windEnabled {
+            // Update wind using the (even lower) windIntensity.
+            wind += Float.random(in: -settings.windIntensity...settings.windIntensity)
+            wind = min(max(wind, -0.003), 0.003)
+            // Only update the rain angle with a 10% chance per frame.
+            if Float.random(in: 0...1) < 0.1 {
+                settings.angle += wind * 30
+                settings.angle = min(max(settings.angle, -85), 85)
             }
-            // For side drops, randomize y position
-            let y = Float.random(in: -1...1)
-            return SIMD2<Float>(x, y)
+        } else {
+            wind = 0
         }
+        time += 0.016
+        ambientColor = SIMD4<Float>(
+            0.05 + 0.01 * sin(time * 0.05),
+            0.05 + 0.01 * sin(time * 0.05 + 2.0),
+            0.1 + 0.01 * sin(time * 0.05 + 4.0),
+            1.0
+        )
     }
 
     // MARK: - Create Raindrops
@@ -442,7 +519,7 @@ class RainView: MTKView {
         raindrops.removeAll()
         for _ in 0..<settings.numberOfDrops {
             let pos = newDropPosition()
-            let special = Float.random(in: 0...1) < 0.01  // 1% chance special (slows & smears)
+            let special = Float.random(in: 0...1) < 0.01
             let drop = Raindrop(
                 position: pos,
                 speed: Float.random(in: settings.speed...(settings.speed * 2)),
@@ -462,7 +539,7 @@ class RainView: MTKView {
             let speed = Float.random(in: 0.012...0.024)
             let vel = SIMD2<Float>(
                 cos(randomAngle) * speed,
-                sin(randomAngle) * speed * 3.0  // enhanced vertical movement
+                sin(randomAngle) * speed * 3.0
             )
             let life = Float.random(in: 0.4...0.8)
             let splash = Splash(position: position, velocity: vel, life: life, startLife: life)
@@ -473,6 +550,8 @@ class RainView: MTKView {
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
+        updateEnvironment()
+
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
             let renderPassDescriptor = currentRenderPassDescriptor,
             let renderEncoder = commandBuffer.makeRenderCommandEncoder(
@@ -481,37 +560,33 @@ class RainView: MTKView {
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
-        // Build vertex arrays for raindrops and splashes.
+        var uniforms = RainUniforms(
+            rainColor: simd4(from: settings.color), ambientColor: ambientColor)
+        renderEncoder.setFragmentBytes(
+            &uniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
+
         var raindropVertices: [Vertex] = []
         var splashVertices: [Vertex] = []
 
         // --- Update and Render Raindrops ---
         for i in 0..<raindrops.count {
-            // For special drops, use reduced speed.
             let effectiveSpeed =
                 raindrops[i].isSpecial ? raindrops[i].speed * 0.5 : raindrops[i].speed
-            let dx = sin(currentAngle) * effectiveSpeed
+            let dx = sin(currentAngle) * effectiveSpeed + wind
             let dy = -cos(currentAngle) * effectiveSpeed
             raindrops[i].position.x += dx
             raindrops[i].position.y += dy
 
-            // Reset conditions
-            let shouldReset =
-                raindrops[i].position.y < -1 || raindrops[i].position.x < -1.2
-                || raindrops[i].position.x > 1.2
-
-            if shouldReset {
+            if raindrops[i].position.y < -1 {
                 createSplash(at: raindrops[i].position)
                 let pos = newDropPosition()
                 let special = Float.random(in: 0...1) < 0.01
                 raindrops[i].position = pos
                 raindrops[i].isSpecial = special
-                // Reset the speed to a new random value
-                raindrops[i].speed = Float.random(in: settings.speed...(settings.speed * 2))
             }
 
             let dropDir = SIMD2<Float>(sin(currentAngle), -cos(currentAngle))
-            let dropLength = raindrops[i].length * 0.5  // very short drop segment
+            let dropLength = raindrops[i].length * 0.5
             let dropEnd = raindrops[i].position + dropDir * dropLength
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 1.0))
             raindropVertices.append(Vertex(position: dropEnd, alpha: 1.0))
@@ -545,7 +620,6 @@ class RainView: MTKView {
             splashVertices.append(Vertex(position: end, alpha: a))
         }
 
-        // --- Draw Raindrops ---
         raindropVertices.withUnsafeBytes { bufferPointer in
             renderEncoder.setVertexBytes(
                 bufferPointer.baseAddress!,
@@ -555,7 +629,6 @@ class RainView: MTKView {
         renderEncoder.drawPrimitives(
             type: .line, vertexStart: 0, vertexCount: raindropVertices.count)
 
-        // --- Draw Splashes ---
         splashVertices.withUnsafeBytes { bufferPointer in
             renderEncoder.setVertexBytes(
                 bufferPointer.baseAddress!,
