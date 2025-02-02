@@ -393,7 +393,7 @@ class RainView: MTKView {
         var speed: Float
         var length: Float
         var isSpecial: Bool
-        var colorIntensity: Float  // New property for depth effect
+        var colorIntensity: Float
     }
 
     struct Splash {
@@ -401,6 +401,7 @@ class RainView: MTKView {
         var velocity: SIMD2<Float>
         var life: Float  // Current life remaining
         var startLife: Float  // For alpha calculation
+        var intensity: Float  // Store the parent drop's intensity
 
         mutating func update() {
             life -= 0.016
@@ -411,7 +412,7 @@ class RainView: MTKView {
 
         var alpha: Float {
             let norm = max(life / startLife, 0)
-            return norm * norm
+            return norm * norm * intensity  // Multiply by intensity
         }
     }
 
@@ -589,7 +590,7 @@ class RainView: MTKView {
 
     // MARK: - Create Splash Particles
 
-    private func createSplash(at position: SIMD2<Float>) {
+    private func createSplash(at position: SIMD2<Float>, intensity: Float) {
         let count = Int.random(in: 3...5)
         for _ in 0..<count {
             let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
@@ -599,7 +600,9 @@ class RainView: MTKView {
                 sin(randomAngle) * speed * 3.0
             )
             let life = Float.random(in: 0.4...0.8)
-            let splash = Splash(position: position, velocity: vel, life: life, startLife: life)
+            let splash = Splash(
+                position: position, velocity: vel, life: life, startLife: life, intensity: intensity
+            )
             splashes.append(splash)
         }
     }
@@ -650,7 +653,12 @@ class RainView: MTKView {
             raindrops[i].position.y += dy
 
             if raindrops[i].position.y < -1 {
-                createSplash(at: raindrops[i].position)
+                // Only create splash if the raindrop is "close" (high intensity)
+                let splashThreshold: Float = 0.85  // Only top 15% intensity drops create splashes
+                if raindrops[i].colorIntensity > splashThreshold {
+                    createSplash(at: raindrops[i].position, intensity: raindrops[i].colorIntensity)
+                }
+
                 let pos = newDropPosition()
                 let special = Float.random(in: 0...1) < 0.01
 
@@ -677,7 +685,8 @@ class RainView: MTKView {
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: dropAlpha))
             raindropVertices.append(Vertex(position: dropEnd, alpha: dropAlpha))
 
-            if raindrops[i].isSpecial {
+            // Only create smear effect for high intensity drops
+            if raindrops[i].isSpecial && raindrops[i].colorIntensity > 0.85 {
                 let smearLength = raindrops[i].length * settings.smearFactor
                 let smearEnd = raindrops[i].position + dropDir * smearLength
                 let smearAlpha = raindrops[i].colorIntensity * 0.3
@@ -686,11 +695,12 @@ class RainView: MTKView {
             }
         }
 
-        // --- Update and Render Splashes ---
+        // Update and Render Splashes
         for i in 0..<splashes.count {
             splashes[i].update()
         }
         splashes = splashes.filter { $0.life > 0 }
+
         for splash in splashes {
             let v = splash.velocity
             let mag = simd_length(v)
