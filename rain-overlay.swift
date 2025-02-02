@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 struct RainSettings: Codable {
     var numberOfDrops: Int
     var speed: Float
-    var angle: Float
+    var angle: Float  // Angle in degrees; now allowed between -85 and +85.
     var color: NSColor
     var length: Float
 
@@ -96,7 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let settings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.01,
-                angle: 30.0,
+                angle: 30.0,  // Positive: rain comes from left.
                 color: NSColor.white,
                 length: 0.1
             )
@@ -187,13 +187,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rainView.settings.speed = max(0.002, rainView.settings.speed - 0.002)
     }
 
+    // Allow the angle to vary between -85 and +85 degrees.
     @objc func increaseAngle() {
         rainView.settings.angle = min(85.0, rainView.settings.angle + 5)
         rainView.createRaindrops()
     }
 
     @objc func decreaseAngle() {
-        rainView.settings.angle = max(5.0, rainView.settings.angle - 5)
+        rainView.settings.angle = max(-85.0, rainView.settings.angle - 5)
         rainView.createRaindrops()
     }
 
@@ -361,6 +362,7 @@ class RainView: MTKView {
         raindrops.removeAll()
 
         for _ in 0..<settings.numberOfDrops {
+            // Start with x randomized within the horizontal bounds and y near the top.
             let x = Float.random(in: -1.5...1.5)
             let y = Float.random(in: 1.0...2.0)
             let position = SIMD2<Float>(x, y)
@@ -389,18 +391,41 @@ class RainView: MTKView {
         renderEncoder.setRenderPipelineState(pipelineState)
         let angleInRadians = settings.angle * (.pi / 180)
 
-        // Draw raindrops.
+        // Define normalized bounds.
+        let leftBound: Float = -1.5
+        let rightBound: Float = 1.5
+        let topBound: Float = 1.5
+        let bottomBound: Float = -1.5
+
+        // Process each raindrop.
         for i in 0..<raindrops.count {
+            // Update position using the angle.
             raindrops[i].position.x += sin(angleInRadians) * raindrops[i].speed
             raindrops[i].position.y -= cos(angleInRadians) * raindrops[i].speed
 
-            if raindrops[i].position.y < -1.5 || raindrops[i].position.x > 1.5
-                || raindrops[i].position.x < -1.5
+            // Check if the raindrop is off screen.
+            if raindrops[i].position.y < bottomBound || raindrops[i].position.x > rightBound
+                || raindrops[i].position.x < leftBound
             {
                 createSplash(at: raindrops[i].position)
-                raindrops[i].position = SIMD2<Float>(Float.random(in: -1.5...1.5), 1.5)
+                // If it has fallen below, re-spawn it at the top with a random x.
+                if raindrops[i].position.y < bottomBound {
+                    raindrops[i].position = SIMD2<Float>(
+                        Float.random(in: leftBound...rightBound), topBound)
+                }
+                // If it exited on the right, re-spawn it at the left with a random y.
+                else if raindrops[i].position.x > rightBound {
+                    raindrops[i].position = SIMD2<Float>(
+                        leftBound, Float.random(in: bottomBound...topBound))
+                }
+                // If it exited on the left, re-spawn it at the right.
+                else if raindrops[i].position.x < leftBound {
+                    raindrops[i].position = SIMD2<Float>(
+                        rightBound, Float.random(in: bottomBound...topBound))
+                }
             }
 
+            // Compute the end point of the raindrop line.
             let endX = raindrops[i].position.x + sin(angleInRadians) * raindrops[i].length
             let endY = raindrops[i].position.y - cos(angleInRadians) * raindrops[i].length
 
@@ -413,17 +438,15 @@ class RainView: MTKView {
             renderEncoder.setVertexBytes(
                 vertices,
                 length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
-                index: 0
-            )
+                index: 0)
             renderEncoder.setFragmentBytes(
                 &alpha,
                 length: MemoryLayout<Float>.stride,
-                index: 1
-            )
+                index: 1)
             renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: 2)
         }
 
-        // Draw splashes.
+        // Process and draw splashes.
         splashes = splashes.filter { $0.life > 0 }
         for i in 0..<splashes.count {
             splashes[i].update()
@@ -437,13 +460,11 @@ class RainView: MTKView {
             renderEncoder.setVertexBytes(
                 vertices,
                 length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
-                index: 0
-            )
+                index: 0)
             renderEncoder.setFragmentBytes(
                 &alpha,
                 length: MemoryLayout<Float>.stride,
-                index: 1
-            )
+                index: 1)
             renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: 2)
         }
 
