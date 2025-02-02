@@ -20,7 +20,7 @@ Requirements: Xcode
 
 ## Future plans
 * Splatter against the desktop windows!
-* Lightining!
+* Lightning!
 * Fireflies!
 * Puddles! Critters!
 * Snow!
