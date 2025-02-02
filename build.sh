@@ -1,1 +1,1 @@
-swiftc -framework Cocoa -framework Metal -framework MetalKit rain-overlay.swift
+swiftc -framework Cocoa -framework Metal -framework MetalKit main.swift rain-overlay.swift -o RainOverlayApp
