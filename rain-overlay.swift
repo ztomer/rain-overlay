@@ -13,7 +13,7 @@ struct RainSettings: Codable {
     var color: NSColor
     var length: Float  // Base length for raindrops (short drops)
     var smearFactor: Float  // Multiplier for the trailing smear
-    var splashIntensity: Float  // Multiplier for splash effect (e.g. 0.3 means 30% intensity)
+    var splashIntensity: Float  // Multiplier for splash effect (e.g., 0.5 = 50% intensity)
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity
@@ -109,7 +109,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Default settings:
             // 200 drops, speed 0.01, angle 30° (rain from left),
             // white color, drop length 0.05, smearFactor 4.0,
-            // splashIntensity 0.3 (i.e. 30% of full splash effect).
+            // splashIntensity 0.5 (i.e., moderate splash effect).
             let defaultSettings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.01,
@@ -117,7 +117,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 color: NSColor.white,
                 length: 0.05,
                 smearFactor: 4.0,
-                splashIntensity: 0.3
+                splashIntensity: 0.5
             )
             rainView = RainView(
                 frame: window.contentView!.bounds, device: device, settings: defaultSettings)
@@ -293,7 +293,7 @@ class RainView: MTKView {
     private var raindrops: [Raindrop] = []
     private var splashes: [Splash] = []
 
-    // Compute current rain angle (in radians) from settings.angle.
+    // Compute current rain angle (radians) from settings.angle.
     private var currentAngle: Float {
         return settings.angle * .pi / 180.0
     }
@@ -401,11 +401,10 @@ class RainView: MTKView {
 
     func createRaindrops() {
         raindrops.removeAll()
-        // Distribute drops from the top and the side (depending on angle).
+        // Distribute drops based on rain angle.
         for _ in 0..<settings.numberOfDrops {
             let source: String
             if settings.angle > 0 {
-                // 50% chance top, 50% chance left.
                 source = Bool.random() ? "top" : "side"
             } else if settings.angle < 0 {
                 source = Bool.random() ? "top" : "side"
@@ -415,11 +414,9 @@ class RainView: MTKView {
             let initialX: Float
             let initialY: Float
             if source == "top" {
-                // From top: y is exactly 1, x spans entire width.
                 initialX = Float.random(in: -1...1)
                 initialY = 1
-            } else {  // "side"
-                // From side: if angle > 0, left edge; if angle < 0, right edge.
+            } else {  // side
                 if settings.angle > 0 {
                     initialX = -1
                 } else if settings.angle < 0 {
@@ -427,8 +424,7 @@ class RainView: MTKView {
                 } else {
                     initialX = Float.random(in: -1...1)
                 }
-                // y is randomized over [0,1] so drops start in the upper half.
-                initialY = Float.random(in: 0...1)
+                initialY = Float.random(in: -1...1)
             }
             let drop = Raindrop(
                 position: SIMD2<Float>(initialX, initialY),
@@ -442,14 +438,14 @@ class RainView: MTKView {
     // MARK: - Create Splash Particles
 
     private func createSplash(at position: SIMD2<Float>) {
-        // Create splashes when a drop hits the bottom.
+        // Create splashes when a drop falls below -0.95.
         let count = Int.random(in: 3...5)
         for _ in 0..<count {
             let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
-            let speed = Float.random(in: 0.01...0.02)
+            let speed = Float.random(in: 0.012...0.024)  // slightly increased speeds
             let vel = SIMD2<Float>(
                 cos(randomAngle) * speed,
-                sin(randomAngle) * speed * 2.5  // enhanced vertical movement
+                sin(randomAngle) * speed * 3.0  // enhanced vertical movement
             )
             let life = Float.random(in: 0.4...0.8)
             let splash = Splash(position: position, velocity: vel, life: life, startLife: life)
@@ -480,10 +476,10 @@ class RainView: MTKView {
             raindrops[i].position.x += dx
             raindrops[i].position.y += dy
 
-            // If a drop falls below -1 (bottom), create a splash and reset it.
+            // If drop falls below -1, create a splash and reset the drop.
             if raindrops[i].position.y < -1 {
                 createSplash(at: raindrops[i].position)
-                // Reset drop: choose new source based on angle.
+                // Reset drop using the same source distribution.
                 let source: String
                 if settings.angle > 0 {
                     source = Bool.random() ? "top" : "side"
@@ -505,7 +501,7 @@ class RainView: MTKView {
                     } else {
                         newX = Float.random(in: -1...1)
                     }
-                    newY = Float.random(in: 0...1)
+                    newY = Float.random(in: -1...1)
                 }
                 raindrops[i].position = SIMD2<Float>(newX, newY)
             }
@@ -516,8 +512,11 @@ class RainView: MTKView {
             // Add drop vertices (full opacity).
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 1.0))
             raindropVertices.append(Vertex(position: dropEnd, alpha: 1.0))
-            // Trailing smear.
-            let smearLength = raindrops[i].length * settings.smearFactor
+            // For the trailing smear, randomize 1 in 100.
+            let isSpecialSmear = Float.random(in: 0...1) < 0.01
+            let effectiveSmearFactor =
+                isSpecialSmear ? settings.smearFactor * 0.5 : settings.smearFactor
+            let smearLength = raindrops[i].length * effectiveSmearFactor
             let smearEnd = raindrops[i].position + dropDir * smearLength
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 0.3))
             raindropVertices.append(Vertex(position: smearEnd, alpha: 0.3))
@@ -533,10 +532,10 @@ class RainView: MTKView {
             let mag = simd_length(v)
             let offset: SIMD2<Float>
             if mag > 0.0001 {
-                offset = (v / mag) * (0.08 * settings.splashIntensity)
+                offset = (v / mag) * (0.1 * settings.splashIntensity)  // use 0.1 now
             } else {
                 offset = SIMD2<Float>(
-                    0.08 * settings.splashIntensity, 0.08 * settings.splashIntensity)
+                    0.1 * settings.splashIntensity, 0.1 * settings.splashIntensity)
             }
             let start = splash.position
             let end = splash.position + offset
