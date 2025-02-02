@@ -2,68 +2,82 @@ import Cocoa
 import Metal
 import MetalKit
 import UniformTypeIdentifiers
+import simd
 
-// MARK: - RainSettings with Codable Conformance
+// MARK: - RainSettings
 
 struct RainSettings: Codable {
     var numberOfDrops: Int
-    var speed: Float
-    var angle: Float  // Angle in degrees; now allowed between -85 and +85.
+    var speed: Float  // Base speed for raindrops
+    var angle: Float  // In degrees; positive means rain comes from the left.
     var color: NSColor
-    var length: Float
+    var length: Float  // Base length for raindrops (short drops)
+    var smearFactor: Float  // Multiplier for the trailing smear
+    var splashIntensity: Float  // Multiplier for splash effect (e.g. 0.3 means 30% intensity)
 
     enum CodingKeys: String, CodingKey {
-        case numberOfDrops, speed, angle, color, length
+        case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity
     }
 
-    // Helper struct for NSColor components.
+    // NSColor isn’t directly Codable – we encode its RGBA components.
     struct ColorComponents: Codable {
-        var red: CGFloat
-        var green: CGFloat
-        var blue: CGFloat
-        var alpha: CGFloat
+        var red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat
     }
 
-    init(numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float) {
+    init(
+        numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float,
+        smearFactor: Float, splashIntensity: Float
+    ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
         self.angle = angle
         self.color = color
         self.length = length
+        self.smearFactor = smearFactor
+        self.splashIntensity = splashIntensity
     }
 
-    // Custom decoding: convert stored RGBA values into an NSColor.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         numberOfDrops = try container.decode(Int.self, forKey: .numberOfDrops)
         speed = try container.decode(Float.self, forKey: .speed)
         angle = try container.decode(Float.self, forKey: .angle)
         length = try container.decode(Float.self, forKey: .length)
-        let components = try container.decode(ColorComponents.self, forKey: .color)
+        smearFactor = try container.decode(Float.self, forKey: .smearFactor)
+        splashIntensity = try container.decode(Float.self, forKey: .splashIntensity)
+        let comps = try container.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
-            calibratedRed: components.red,
-            green: components.green,
-            blue: components.blue,
-            alpha: components.alpha)
+            calibratedRed: comps.red,
+            green: comps.green,
+            blue: comps.blue,
+            alpha: comps.alpha)
     }
 
-    // Custom encoding: extract NSColor's RGBA values.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(numberOfDrops, forKey: .numberOfDrops)
         try container.encode(speed, forKey: .speed)
         try container.encode(angle, forKey: .angle)
         try container.encode(length, forKey: .length)
+        try container.encode(smearFactor, forKey: .smearFactor)
+        try container.encode(splashIntensity, forKey: .splashIntensity)
         var red: CGFloat = 0
         var green: CGFloat = 0
         var blue: CGFloat = 0
         var alpha: CGFloat = 0
-        if let colorRGB = color.usingColorSpace(.deviceRGB) {
-            colorRGB.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        if let rgb = color.usingColorSpace(.deviceRGB) {
+            rgb.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
         }
-        let components = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
-        try container.encode(components, forKey: .color)
+        let comps = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
+        try container.encode(comps, forKey: .color)
     }
+}
+
+// MARK: - Vertex Structure
+
+struct Vertex {
+    var position: SIMD2<Float>
+    var alpha: Float
 }
 
 // MARK: - AppDelegate
@@ -74,7 +88,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.prohibited)
+        NSApp.setActivationPolicy(.accessory)
         setupStatusBarItem()
 
         let screen = NSScreen.main!
@@ -82,8 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             contentRect: screen.frame,
             styleMask: [.borderless],
             backing: .buffered,
-            defer: false
-        )
+            defer: false)
         window.backgroundColor = .clear
         window.level = .floating
         window.ignoresMouseEvents = true
@@ -93,18 +106,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.backgroundColor = NSColor.clear
 
         if let device = MTLCreateSystemDefaultDevice() {
-            let settings = RainSettings(
+            // Default settings:
+            // 200 drops, speed 0.01, angle 30° (rain from left),
+            // white color, drop length 0.05, smearFactor 4.0,
+            // splashIntensity 0.3 (i.e. 30% of full splash effect).
+            let defaultSettings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.01,
-                angle: 30.0,  // Positive: rain comes from left.
+                angle: 30.0,
                 color: NSColor.white,
-                length: 0.1
+                length: 0.05,
+                smearFactor: 4.0,
+                splashIntensity: 0.3
             )
             rainView = RainView(
-                frame: window.contentView!.bounds,
-                device: device,
-                settings: settings
-            )
+                frame: window.contentView!.bounds, device: device, settings: defaultSettings)
             window.contentView = rainView
             rainView.layer?.isOpaque = false
             rainView.wantsLayer = true
@@ -153,7 +169,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSMenuItem(title: "Load Config", action: #selector(loadConfig), keyEquivalent: "p"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
-
         statusItem.menu = menu
     }
 
@@ -162,8 +177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.menu?.popUp(
                 positioning: nil,
                 at: NSPoint(x: 0, y: button.bounds.height),
-                in: button
-            )
+                in: button)
         }
     }
 
@@ -187,7 +201,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rainView.settings.speed = max(0.002, rainView.settings.speed - 0.002)
     }
 
-    // Allow the angle to vary between -85 and +85 degrees.
     @objc func increaseAngle() {
         rainView.settings.angle = min(85.0, rainView.settings.angle + 5)
         rainView.createRaindrops()
@@ -199,11 +212,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func increaseLength() {
-        rainView.settings.length += 0.05
+        rainView.settings.length += 0.005
     }
 
     @objc func decreaseLength() {
-        rainView.settings.length = max(0.05, rainView.settings.length - 0.05)
+        rainView.settings.length = max(0.005, rainView.settings.length - 0.005)
     }
 
     @objc func changeColor() {
@@ -217,11 +230,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rainView.settings.color = sender.color
     }
 
-    // MARK: - Save/Load Configuration
-
     @objc func saveConfig() {
         let savePanel = NSSavePanel()
-        // Use allowedContentTypes (UTType.json) instead of deprecated allowedFileTypes.
         savePanel.allowedContentTypes = [UTType.json]
         savePanel.nameFieldStringValue = "rainConfig.json"
         savePanel.begin { [weak self] response in
@@ -245,7 +255,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func loadConfig() {
         let openPanel = NSOpenPanel()
-        // Use allowedContentTypes (UTType.json) instead of deprecated allowedFileTypes.
         openPanel.allowedContentTypes = [UTType.json]
         openPanel.begin { [weak self] response in
             if response == .OK, let url = openPanel.url {
@@ -258,8 +267,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let decoder = JSONDecoder()
         do {
             let data = try Data(contentsOf: url)
-            let settings = try decoder.decode(RainSettings.self, from: data)
-            rainView.settings = settings
+            let newSettings = try decoder.decode(RainSettings.self, from: data)
+            rainView.settings = newSettings
             rainView.createRaindrops()
             print("Config loaded from \(url.path)")
         } catch {
@@ -275,11 +284,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - RainView
 
 class RainView: MTKView {
+
     var settings: RainSettings
+
     private var commandQueue: MTLCommandQueue!
     private var pipelineState: MTLRenderPipelineState!
+
     private var raindrops: [Raindrop] = []
     private var splashes: [Splash] = []
+
+    // Compute current rain angle (in radians) from settings.angle.
+    private var currentAngle: Float {
+        return settings.angle * .pi / 180.0
+    }
+
+    // MARK: - Types
 
     struct Raindrop {
         var position: SIMD2<Float>
@@ -287,25 +306,33 @@ class RainView: MTKView {
         var length: Float
     }
 
+    // Splash particles using physics.
     struct Splash {
         var position: SIMD2<Float>
         var velocity: SIMD2<Float>
-        var life: Float
+        var life: Float  // current life remaining
+        var startLife: Float  // for alpha calculation
 
         mutating func update() {
+            // dt ≈ 0.016 at 60fps.
             life -= 0.016
-            velocity.y -= 0.001
+            velocity *= 0.99  // smoother drag
+            velocity.y -= 0.003  // reduced gravity
             position += velocity
         }
 
         var alpha: Float {
-            return max(life / 0.5, 0)
+            let norm = max(life / startLife, 0)
+            return norm * norm  // squared fade-out
         }
     }
 
-    init(frame: CGRect, device: MTLDevice, settings: RainSettings) {
+    // MARK: - Initializer
+
+    init(frame frameRect: CGRect, device: MTLDevice, settings: RainSettings) {
         self.settings = settings
-        super.init(frame: frame, device: device)
+        super.init(frame: frameRect, device: device)
+
         self.commandQueue = device.makeCommandQueue()
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         self.colorPixelFormat = .bgra8Unorm
@@ -315,35 +342,45 @@ class RainView: MTKView {
         createRaindrops()
 
         self.preferredFramesPerSecond = 60
+        self.enableSetNeedsDisplay = true
         self.isPaused = false
-        self.enableSetNeedsDisplay = false
     }
 
     required init(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    // MARK: - Setup Pipeline
+
     private func setupPipeline() {
         guard let device = self.device else { return }
-
+        // Shader using per-vertex alpha.
         let shaderSource = """
             #include <metal_stdlib>
             using namespace metal;
-
-            vertex float4 vertexShader(uint vertexID [[vertex_id]], constant float2 *vertices [[buffer(0)]]) {
-                return float4(vertices[vertexID], 0.0, 1.0);
+            struct Vertex {
+                float2 position;
+                float alpha;
+            };
+            struct VertexOut {
+                float4 position [[position]];
+                float alpha;
+            };
+            vertex VertexOut vertexShader(uint vertexID [[vertex_id]],
+                                          const device Vertex *vertices [[buffer(0)]]) {
+                VertexOut out;
+                out.position = float4(vertices[vertexID].position, 0.0, 1.0);
+                out.alpha = vertices[vertexID].alpha;
+                return out;
             }
-
-            fragment float4 fragmentShader(float4 position [[position]], constant float &alpha [[buffer(1)]]) {
-                return float4(0.7, 0.7, 1.0, alpha);
+            fragment float4 fragmentShader(VertexOut in [[stage_in]]) {
+                return float4(0.7, 0.7, 1.0, in.alpha * 0.3);
             }
             """
-
         do {
             let library = try device.makeLibrary(source: shaderSource, options: nil)
             let vertexFunction = library.makeFunction(name: "vertexShader")
             let fragmentFunction = library.makeFunction(name: "fragmentShader")
-
             let pipelineDescriptor = MTLRenderPipelineDescriptor()
             pipelineDescriptor.vertexFunction = vertexFunction
             pipelineDescriptor.fragmentFunction = fragmentFunction
@@ -351,35 +388,76 @@ class RainView: MTKView {
             pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
             pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
             pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-
+            pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+            pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor =
+                .oneMinusSourceAlpha
             pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         } catch {
             print("Failed to create pipeline state: \(error)")
         }
     }
 
+    // MARK: - Create Raindrops
+
     func createRaindrops() {
         raindrops.removeAll()
-
+        // Distribute drops from the top and the side (depending on angle).
         for _ in 0..<settings.numberOfDrops {
-            // Start with x randomized within the horizontal bounds and y near the top.
-            let x = Float.random(in: -1.5...1.5)
-            let y = Float.random(in: 1.0...2.0)
-            let position = SIMD2<Float>(x, y)
-            let speed = Float.random(in: settings.speed...settings.speed * 2)
-            let length = Float.random(in: settings.length...settings.length * 2)
-            raindrops.append(Raindrop(position: position, speed: speed, length: length))
+            let source: String
+            if settings.angle > 0 {
+                // 50% chance top, 50% chance left.
+                source = Bool.random() ? "top" : "side"
+            } else if settings.angle < 0 {
+                source = Bool.random() ? "top" : "side"
+            } else {
+                source = "top"
+            }
+            let initialX: Float
+            let initialY: Float
+            if source == "top" {
+                // From top: y is exactly 1, x spans entire width.
+                initialX = Float.random(in: -1...1)
+                initialY = 1
+            } else {  // "side"
+                // From side: if angle > 0, left edge; if angle < 0, right edge.
+                if settings.angle > 0 {
+                    initialX = -1
+                } else if settings.angle < 0 {
+                    initialX = 1
+                } else {
+                    initialX = Float.random(in: -1...1)
+                }
+                // y is randomized over [0,1] so drops start in the upper half.
+                initialY = Float.random(in: 0...1)
+            }
+            let drop = Raindrop(
+                position: SIMD2<Float>(initialX, initialY),
+                speed: Float.random(in: settings.speed...(settings.speed * 2)),
+                length: Float.random(in: settings.length...(settings.length * 2))
+            )
+            raindrops.append(drop)
         }
     }
+
+    // MARK: - Create Splash Particles
 
     private func createSplash(at position: SIMD2<Float>) {
-        for _ in 0..<5 {
-            let angle = Float.random(in: -Float.pi...Float.pi)
-            let speed = Float.random(in: 0.002...0.006)
-            let velocity = SIMD2<Float>(cos(angle) * speed, sin(angle) * speed * 2)
-            splashes.append(Splash(position: position, velocity: velocity, life: 0.5))
+        // Create splashes when a drop hits the bottom.
+        let count = Int.random(in: 3...5)
+        for _ in 0..<count {
+            let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
+            let speed = Float.random(in: 0.01...0.02)
+            let vel = SIMD2<Float>(
+                cos(randomAngle) * speed,
+                sin(randomAngle) * speed * 2.5  // enhanced vertical movement
+            )
+            let life = Float.random(in: 0.4...0.8)
+            let splash = Splash(position: position, velocity: vel, life: life, startLife: life)
+            splashes.append(splash)
         }
     }
+
+    // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
@@ -389,92 +467,107 @@ class RainView: MTKView {
         else { return }
 
         renderEncoder.setRenderPipelineState(pipelineState)
-        let angleInRadians = settings.angle * (.pi / 180)
 
-        // Define normalized bounds.
-        let leftBound: Float = -1.5
-        let rightBound: Float = 1.5
-        let topBound: Float = 1.5
-        let bottomBound: Float = -1.5
+        // Build vertex arrays for raindrops and splashes.
+        var raindropVertices: [Vertex] = []
+        var splashVertices: [Vertex] = []
 
-        // Process each raindrop.
+        // --- Update and Render Raindrops ---
         for i in 0..<raindrops.count {
-            // Update position using the angle.
-            raindrops[i].position.x += sin(angleInRadians) * raindrops[i].speed
-            raindrops[i].position.y -= cos(angleInRadians) * raindrops[i].speed
+            // Update drop position.
+            let dx = sin(currentAngle) * raindrops[i].speed
+            let dy = -cos(currentAngle) * raindrops[i].speed
+            raindrops[i].position.x += dx
+            raindrops[i].position.y += dy
 
-            // Check if the raindrop is off screen.
-            if raindrops[i].position.y < bottomBound || raindrops[i].position.x > rightBound
-                || raindrops[i].position.x < leftBound
-            {
+            // If a drop falls below -1 (bottom), create a splash and reset it.
+            if raindrops[i].position.y < -1 {
                 createSplash(at: raindrops[i].position)
-                // If it has fallen below, re-spawn it at the top with a random x.
-                if raindrops[i].position.y < bottomBound {
-                    raindrops[i].position = SIMD2<Float>(
-                        Float.random(in: leftBound...rightBound), topBound)
+                // Reset drop: choose new source based on angle.
+                let source: String
+                if settings.angle > 0 {
+                    source = Bool.random() ? "top" : "side"
+                } else if settings.angle < 0 {
+                    source = Bool.random() ? "top" : "side"
+                } else {
+                    source = "top"
                 }
-                // If it exited on the right, re-spawn it at the left with a random y.
-                else if raindrops[i].position.x > rightBound {
-                    raindrops[i].position = SIMD2<Float>(
-                        leftBound, Float.random(in: bottomBound...topBound))
+                let newX: Float
+                let newY: Float
+                if source == "top" {
+                    newX = Float.random(in: -1...1)
+                    newY = 1
+                } else {  // side
+                    if settings.angle > 0 {
+                        newX = -1
+                    } else if settings.angle < 0 {
+                        newX = 1
+                    } else {
+                        newX = Float.random(in: -1...1)
+                    }
+                    newY = Float.random(in: 0...1)
                 }
-                // If it exited on the left, re-spawn it at the right.
-                else if raindrops[i].position.x < leftBound {
-                    raindrops[i].position = SIMD2<Float>(
-                        rightBound, Float.random(in: bottomBound...topBound))
-                }
+                raindrops[i].position = SIMD2<Float>(newX, newY)
             }
 
-            // Compute the end point of the raindrop line.
-            let endX = raindrops[i].position.x + sin(angleInRadians) * raindrops[i].length
-            let endY = raindrops[i].position.y - cos(angleInRadians) * raindrops[i].length
-
-            let vertices: [SIMD2<Float>] = [
-                raindrops[i].position,
-                SIMD2<Float>(endX, endY),
-            ]
-
-            var alpha: Float = 1.0
-            renderEncoder.setVertexBytes(
-                vertices,
-                length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
-                index: 0)
-            renderEncoder.setFragmentBytes(
-                &alpha,
-                length: MemoryLayout<Float>.stride,
-                index: 1)
-            renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: 2)
+            let dropDir = SIMD2<Float>(sin(currentAngle), -cos(currentAngle))
+            let dropLength = raindrops[i].length * 0.5  // much shorter drops
+            let dropEnd = raindrops[i].position + dropDir * dropLength
+            // Add drop vertices (full opacity).
+            raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 1.0))
+            raindropVertices.append(Vertex(position: dropEnd, alpha: 1.0))
+            // Trailing smear.
+            let smearLength = raindrops[i].length * settings.smearFactor
+            let smearEnd = raindrops[i].position + dropDir * smearLength
+            raindropVertices.append(Vertex(position: raindrops[i].position, alpha: 0.3))
+            raindropVertices.append(Vertex(position: smearEnd, alpha: 0.3))
         }
 
-        // Process and draw splashes.
-        splashes = splashes.filter { $0.life > 0 }
+        // --- Update and Render Splashes ---
         for i in 0..<splashes.count {
             splashes[i].update()
-
-            let vertices: [SIMD2<Float>] = [
-                splashes[i].position,
-                splashes[i].position + SIMD2<Float>(0.01, 0.01),
-            ]
-
-            var alpha = splashes[i].alpha
-            renderEncoder.setVertexBytes(
-                vertices,
-                length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
-                index: 0)
-            renderEncoder.setFragmentBytes(
-                &alpha,
-                length: MemoryLayout<Float>.stride,
-                index: 1)
-            renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: 2)
+        }
+        splashes = splashes.filter { $0.life > 0 }
+        for splash in splashes {
+            let v = splash.velocity
+            let mag = simd_length(v)
+            let offset: SIMD2<Float>
+            if mag > 0.0001 {
+                offset = (v / mag) * (0.08 * settings.splashIntensity)
+            } else {
+                offset = SIMD2<Float>(
+                    0.08 * settings.splashIntensity, 0.08 * settings.splashIntensity)
+            }
+            let start = splash.position
+            let end = splash.position + offset
+            let a = splash.alpha * settings.splashIntensity
+            splashVertices.append(Vertex(position: start, alpha: a))
+            splashVertices.append(Vertex(position: end, alpha: a))
         }
 
-        renderEncoder.endEncoding()
+        // --- Draw Raindrops ---
+        raindropVertices.withUnsafeBytes { bufferPointer in
+            renderEncoder.setVertexBytes(
+                bufferPointer.baseAddress!,
+                length: raindropVertices.count * MemoryLayout<Vertex>.stride,
+                index: 0)
+        }
+        renderEncoder.drawPrimitives(
+            type: .line, vertexStart: 0, vertexCount: raindropVertices.count)
 
+        // --- Draw Splashes ---
+        splashVertices.withUnsafeBytes { bufferPointer in
+            renderEncoder.setVertexBytes(
+                bufferPointer.baseAddress!,
+                length: splashVertices.count * MemoryLayout<Vertex>.stride,
+                index: 0)
+        }
+        renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: splashVertices.count)
+
+        renderEncoder.endEncoding()
         if let drawable = currentDrawable {
             commandBuffer.present(drawable)
         }
-
         commandBuffer.commit()
-        self.setNeedsDisplay(self.bounds)
     }
 }
