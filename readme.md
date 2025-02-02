@@ -19,13 +19,13 @@ Requirements: Xcode
 2. Run `./RainOverlayApp`
 
 ## Future plans
-[] Splatter against the desktop windows!
-[] Lightining!
-[] Fireflies!
-[] Puddles! Critters!
-[] Snow!
-[] Raining blood!
-[] Nothing at all!
+* Splatter against the desktop windows!
+* Lightining!
+* Fireflies!
+* Puddles! Critters!
+* Snow!
+* Raining blood!
+* Nothing at all!
 
 ## License
 * MIT
