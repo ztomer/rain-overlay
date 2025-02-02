@@ -1,14 +1,72 @@
 import Cocoa
 import Metal
 import MetalKit
+import UniformTypeIdentifiers
 
-struct RainSettings {
+// MARK: - RainSettings with Codable Conformance
+
+struct RainSettings: Codable {
     var numberOfDrops: Int
     var speed: Float
     var angle: Float
     var color: NSColor
     var length: Float
+
+    enum CodingKeys: String, CodingKey {
+        case numberOfDrops, speed, angle, color, length
+    }
+
+    // Helper struct for NSColor components.
+    struct ColorComponents: Codable {
+        var red: CGFloat
+        var green: CGFloat
+        var blue: CGFloat
+        var alpha: CGFloat
+    }
+
+    init(numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float) {
+        self.numberOfDrops = numberOfDrops
+        self.speed = speed
+        self.angle = angle
+        self.color = color
+        self.length = length
+    }
+
+    // Custom decoding: convert stored RGBA values into an NSColor.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        numberOfDrops = try container.decode(Int.self, forKey: .numberOfDrops)
+        speed = try container.decode(Float.self, forKey: .speed)
+        angle = try container.decode(Float.self, forKey: .angle)
+        length = try container.decode(Float.self, forKey: .length)
+        let components = try container.decode(ColorComponents.self, forKey: .color)
+        color = NSColor(
+            calibratedRed: components.red,
+            green: components.green,
+            blue: components.blue,
+            alpha: components.alpha)
+    }
+
+    // Custom encoding: extract NSColor's RGBA values.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(numberOfDrops, forKey: .numberOfDrops)
+        try container.encode(speed, forKey: .speed)
+        try container.encode(angle, forKey: .angle)
+        try container.encode(length, forKey: .length)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        if let colorRGB = color.usingColorSpace(.deviceRGB) {
+            colorRGB.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        }
+        let components = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
+        try container.encode(components, forKey: .color)
+    }
 }
+
+// MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
@@ -17,7 +75,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.prohibited)
-
         setupStatusBarItem()
 
         let screen = NSScreen.main!
@@ -27,7 +84,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-
         window.backgroundColor = .clear
         window.level = .floating
         window.ignoresMouseEvents = true
@@ -45,7 +101,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 length: 0.1
             )
             rainView = RainView(
-                frame: window.contentView!.bounds, device: device, settings: settings)
+                frame: window.contentView!.bounds,
+                device: device,
+                settings: settings
+            )
             window.contentView = rainView
             rainView.layer?.isOpaque = false
             rainView.wantsLayer = true
@@ -60,7 +119,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(toggleMenu(_:))
         }
-
         let menu = NSMenu()
         menu.addItem(
             NSMenuItem(
@@ -89,6 +147,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(
             NSMenuItem(title: "Change Color", action: #selector(changeColor), keyEquivalent: "c"))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(
+            NSMenuItem(title: "Save Config", action: #selector(saveConfig), keyEquivalent: "o"))
+        menu.addItem(
+            NSMenuItem(title: "Load Config", action: #selector(loadConfig), keyEquivalent: "p"))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
 
         statusItem.menu = menu
@@ -97,9 +160,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func toggleMenu(_ sender: Any?) {
         if let button = statusItem.button {
             statusItem.menu?.popUp(
-                positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+                positioning: nil,
+                at: NSPoint(x: 0, y: button.bounds.height),
+                in: button
+            )
         }
     }
+
+    // MARK: - Rain Settings Actions
 
     @objc func increaseDrops() {
         rainView.settings.numberOfDrops += 50
@@ -148,10 +216,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         rainView.settings.color = sender.color
     }
 
+    // MARK: - Save/Load Configuration
+
+    @objc func saveConfig() {
+        let savePanel = NSSavePanel()
+        // Use allowedContentTypes (UTType.json) instead of deprecated allowedFileTypes.
+        savePanel.allowedContentTypes = [UTType.json]
+        savePanel.nameFieldStringValue = "rainConfig.json"
+        savePanel.begin { [weak self] response in
+            if response == .OK, let url = savePanel.url {
+                self?.writeConfig(to: url)
+            }
+        }
+    }
+
+    func writeConfig(to url: URL) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        do {
+            let data = try encoder.encode(rainView.settings)
+            try data.write(to: url)
+            print("Config saved to \(url.path)")
+        } catch {
+            print("Failed to save config: \(error)")
+        }
+    }
+
+    @objc func loadConfig() {
+        let openPanel = NSOpenPanel()
+        // Use allowedContentTypes (UTType.json) instead of deprecated allowedFileTypes.
+        openPanel.allowedContentTypes = [UTType.json]
+        openPanel.begin { [weak self] response in
+            if response == .OK, let url = openPanel.url {
+                self?.readConfig(from: url)
+            }
+        }
+    }
+
+    func readConfig(from url: URL) {
+        let decoder = JSONDecoder()
+        do {
+            let data = try Data(contentsOf: url)
+            let settings = try decoder.decode(RainSettings.self, from: data)
+            rainView.settings = settings
+            rainView.createRaindrops()
+            print("Config loaded from \(url.path)")
+        } catch {
+            print("Failed to load config: \(error)")
+        }
+    }
+
     @objc func quitApp() {
         NSApplication.shared.terminate(self)
     }
 }
+
+// MARK: - RainView
 
 class RainView: MTKView {
     var settings: RainSettings
@@ -185,7 +305,6 @@ class RainView: MTKView {
     init(frame: CGRect, device: MTLDevice, settings: RainSettings) {
         self.settings = settings
         super.init(frame: frame, device: device)
-
         self.commandQueue = device.makeCommandQueue()
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         self.colorPixelFormat = .bgra8Unorm
@@ -265,14 +384,12 @@ class RainView: MTKView {
             let renderPassDescriptor = currentRenderPassDescriptor,
             let renderEncoder = commandBuffer.makeRenderCommandEncoder(
                 descriptor: renderPassDescriptor)
-        else {
-            return
-        }
+        else { return }
 
         renderEncoder.setRenderPipelineState(pipelineState)
-
         let angleInRadians = settings.angle * (.pi / 180)
 
+        // Draw raindrops.
         for i in 0..<raindrops.count {
             raindrops[i].position.x += sin(angleInRadians) * raindrops[i].speed
             raindrops[i].position.y -= cos(angleInRadians) * raindrops[i].speed
@@ -294,11 +411,19 @@ class RainView: MTKView {
 
             var alpha: Float = 1.0
             renderEncoder.setVertexBytes(
-                vertices, length: MemoryLayout<SIMD2<Float>>.stride * vertices.count, index: 0)
-            renderEncoder.setFragmentBytes(&alpha, length: MemoryLayout<Float>.stride, index: 1)
+                vertices,
+                length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
+                index: 0
+            )
+            renderEncoder.setFragmentBytes(
+                &alpha,
+                length: MemoryLayout<Float>.stride,
+                index: 1
+            )
             renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: 2)
         }
 
+        // Draw splashes.
         splashes = splashes.filter { $0.life > 0 }
         for i in 0..<splashes.count {
             splashes[i].update()
@@ -310,8 +435,15 @@ class RainView: MTKView {
 
             var alpha = splashes[i].alpha
             renderEncoder.setVertexBytes(
-                vertices, length: MemoryLayout<SIMD2<Float>>.stride * vertices.count, index: 0)
-            renderEncoder.setFragmentBytes(&alpha, length: MemoryLayout<Float>.stride, index: 1)
+                vertices,
+                length: MemoryLayout<SIMD2<Float>>.stride * vertices.count,
+                index: 0
+            )
+            renderEncoder.setFragmentBytes(
+                &alpha,
+                length: MemoryLayout<Float>.stride,
+                index: 1
+            )
             renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: 2)
         }
 
