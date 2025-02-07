@@ -1,6 +1,13 @@
+//
+//  RainOverlay.swift
+//  Example macOS SwiftUI app
+//
+
 import Cocoa
+import Combine
 import Metal
 import MetalKit
+import SwiftUI
 import UniformTypeIdentifiers
 import simd
 
@@ -18,7 +25,7 @@ struct RainSettings: Codable {
     var windIntensity: Float
     var mouseEnabled: Bool
     var mouseInfluenceIntensity: Float
-    var maxFPS: Int  // New property for limiting FPS
+    var maxFPS: Int
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity, windEnabled,
@@ -30,9 +37,18 @@ struct RainSettings: Codable {
     }
 
     init(
-        numberOfDrops: Int, speed: Float, angle: Float, color: NSColor, length: Float,
-        smearFactor: Float, splashIntensity: Float, windEnabled: Bool, windIntensity: Float,
-        mouseEnabled: Bool, mouseInfluenceIntensity: Float, maxFPS: Int = 30  // Default FPS
+        numberOfDrops: Int,
+        speed: Float,
+        angle: Float,
+        color: NSColor,
+        length: Float,
+        smearFactor: Float,
+        splashIntensity: Float,
+        windEnabled: Bool,
+        windIntensity: Float,
+        mouseEnabled: Bool,
+        mouseInfluenceIntensity: Float,
+        maxFPS: Int = 30
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -60,7 +76,8 @@ struct RainSettings: Codable {
         windIntensity = try container.decode(Float.self, forKey: .windIntensity)
         mouseEnabled = try container.decode(Bool.self, forKey: .mouseEnabled)
         mouseInfluenceIntensity = try container.decode(Float.self, forKey: .mouseInfluenceIntensity)
-        maxFPS = try container.decodeIfPresent(Int.self, forKey: .maxFPS) ?? 30  // Default if not present
+        maxFPS = try container.decodeIfPresent(Int.self, forKey: .maxFPS) ?? 30
+
         let comps = try container.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
             calibratedRed: comps.red,
@@ -95,66 +112,489 @@ struct RainSettings: Codable {
     }
 }
 
-// MARK: - Uniforms
+// MARK: - SettingsWindowController
+class SettingsWindowController: NSWindowController {
+    var rainView: RainView
 
-struct RainUniforms {
-    var rainColor: SIMD4<Float>
-    var ambientColor: SIMD4<Float>
+    init(rainView: RainView) {
+        self.rainView = rainView
+
+        // Create our custom borderless window
+        let window = SettingsWindow()
+        super.init(window: window)
+
+        // Access the SwiftUI hosting view inside the VFX -> HostingView chain
+        if let settingsWindow = window.contentView?.subviews.first?.subviews.first
+            as? NSHostingView<SettingsView>
+        {
+            // Pass the parentWindow reference to the SettingsView so it can close itself
+            let settingsView = SettingsView(rainView: rainView, parentWindow: window)
+            settingsWindow.rootView = settingsView
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 }
 
-// MARK: - Vertex Structure
-
-struct Vertex {
-    var position: SIMD2<Float>
-    var alpha: Float
-}
-
-// MARK: - AppDelegate
-
-class AppDelegate: NSObject, NSApplicationDelegate {
-    var window: NSWindow!
-    var rainView: RainView!
-    var statusItem: NSStatusItem!
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-        setupStatusBarItem()
-
-        let screen = NSScreen.main!
-        window = NSWindow(
-            contentRect: screen.frame,
+// MARK: - SettingsWindow
+class SettingsWindow: NSWindow {
+    init() {
+        // Make window 800×600, borderless, and rounded corners
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
             styleMask: [.borderless],
             backing: .buffered,
-            defer: false)
-        window.backgroundColor = .clear
-        window.level = .floating
-        window.ignoresMouseEvents = true
-        window.isOpaque = false
-        window.hasShadow = false
-        window.alphaValue = 1.0
-        window.backgroundColor = NSColor.clear
+            defer: false
+        )
 
-        if let device = MTLCreateSystemDefaultDevice() {
-            // Default settings:
-            // 200 drops, speed 0.005 (slow), angle 30° (rain from left), white rain color,
-            // drop length 0.05, smearFactor 4.0, splashIntensity 0.3,
-            // wind enabled with a very gentle intensity (default 0.0001),
-            // mouse influence disabled by default.
-            let defaultSettings = RainSettings(
+        self.isMovableByWindowBackground = true
+        self.backgroundColor = NSColor.clear
+
+        let visualEffect = NSVisualEffectView()
+        visualEffect.material = .hudWindow
+        visualEffect.state = .active
+        visualEffect.blendingMode = .behindWindow
+
+        // Rounded corners:
+        visualEffect.wantsLayer = true
+        visualEffect.layer?.cornerRadius = 20
+        visualEffect.layer?.masksToBounds = true
+
+        let settingsView = SettingsView(rainView: nil, parentWindow: nil)
+        let hostingView = NSHostingView(rootView: settingsView)
+
+        visualEffect.frame = contentView?.bounds ?? .zero
+        visualEffect.autoresizingMask = [.width, .height]
+        visualEffect.addSubview(hostingView)
+
+        hostingView.frame = visualEffect.bounds
+        hostingView.autoresizingMask = [.width, .height]
+
+        self.contentView = visualEffect
+    }
+}
+
+// MARK: - FluorescentNeonText
+/// A random flicker neon glow effect
+struct FluorescentNeonText: ViewModifier {
+    @State private var flickerFactor: CGFloat = 1.0
+    @State private var timer: Timer?
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(
+                LinearGradient(
+                    colors: [.pink, .cyan],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing)
+            )
+            .shadow(color: .pink.opacity(0.7 * flickerFactor), radius: 5, x: 0, y: 0)
+            .shadow(color: .cyan.opacity(0.5 * flickerFactor), radius: 5, x: 0, y: 0)
+            .onAppear { startFlicker() }
+            .onDisappear {
+                timer?.invalidate()
+                timer = nil
+            }
+    }
+
+    private func startFlicker() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(
+            withTimeInterval: Double.random(in: 0.3...1.2),
+            repeats: false
+        ) { _ in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                flickerFactor = CGFloat.random(in: 0.6...1.0)
+            }
+            startFlicker()
+        }
+    }
+}
+
+extension View {
+    func fluorescentNeon() -> some View {
+        self.modifier(FluorescentNeonText())
+    }
+}
+
+// MARK: - SettingsView
+struct SettingsView: View {
+    @ObservedObject var settingsStore: RainSettingsStore
+
+    // A direct reference to the parent NSWindow so we can close it
+    let parentWindow: NSWindow?
+
+    init(rainView: RainView?, parentWindow: NSWindow?) {
+        self.settingsStore = RainSettingsStore(rainView: rainView)
+        self.parentWindow = parentWindow
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Rain Settings")
+                .font(.system(size: 28, weight: .bold))
+                .fluorescentNeon()
+
+            // Two-column layout for numeric settings
+            HStack(alignment: .top, spacing: 20) {
+                VStack(spacing: 20) {
+                    NumericSettingRow(
+                        title: "Number of Drops",
+                        value: $settingsStore.numberOfDrops,
+                        range: 0...1000,
+                        step: 50
+                    )
+                    NumericSettingRow(
+                        title: "Speed",
+                        value: $settingsStore.speed,
+                        range: 0.001...0.02,
+                        step: 0.001
+                    )
+                    NumericSettingRow(
+                        title: "Angle",
+                        value: $settingsStore.angle,
+                        range: -85...85,
+                        step: 5
+                    )
+                }
+                VStack(spacing: 20) {
+                    NumericSettingRow(
+                        title: "Length",
+                        value: $settingsStore.length,
+                        range: 0.005...0.2,
+                        step: 0.005
+                    )
+                    NumericSettingRow(
+                        title: "Wind Intensity",
+                        value: $settingsStore.windIntensity,
+                        range: 0.00001...0.001,
+                        step: 0.0001
+                    )
+                    NumericSettingRow(
+                        title: "Mouse Influence",
+                        value: $settingsStore.mouseInfluenceIntensity,
+                        range: 0...0.01,
+                        step: 0.0005
+                    )
+                }
+            }
+
+            // One row for toggles
+            HStack(spacing: 30) {
+                ToggleSettingRow(
+                    title: "Wind Enabled",
+                    isOn: $settingsStore.windEnabled
+                )
+                ToggleSettingRow(
+                    title: "Mouse Influence",
+                    isOn: $settingsStore.mouseEnabled
+                )
+            }
+
+            // Color picker
+            ColorPicker("Rain Color", selection: $settingsStore.color)
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(
+                            LinearGradient(
+                                colors: [.blue.opacity(0.5), .purple.opacity(0.5)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ),
+                            lineWidth: 1
+                        )
+                )
+                .fluorescentNeon()
+
+            // Load / Save Buttons
+            HStack(spacing: 20) {
+                Button("Load from JSON") { loadFromJSON() }
+                    .fluorescentNeon()
+                Button("Save to JSON") { saveToJSON() }
+                    .fluorescentNeon()
+            }
+            .padding(.top, 10)
+
+            Spacer()
+
+            // "Close" at bottom
+            HStack {
+                Spacer()
+                Button("Close") {
+                    closeSettingsWindow()
+                }
+                .fluorescentNeon()
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+                )
+                .padding([.bottom, .trailing], 10)
+            }
+        }
+        .padding(30)
+        .frame(width: 800, height: 600)
+    }
+
+    // MARK: - JSON Load/Save
+
+    private func loadFromJSON() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        if #available(macOS 12.0, *) {
+            panel.allowedContentTypes = [.json]
+        } else {
+            panel.allowedFileTypes = ["json"]
+        }
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let data = try Data(contentsOf: url)
+                let newSettings = try JSONDecoder().decode(RainSettings.self, from: data)
+                settingsStore.updateFrom(newSettings)
+            } catch {
+                print("Error loading settings from JSON: \(error)")
+            }
+        }
+    }
+
+    private func saveToJSON() {
+        let panel = NSSavePanel()
+
+        if #available(macOS 12.0, *) {
+            panel.allowedContentTypes = [.json]
+        } else {
+            panel.allowedFileTypes = ["json"]
+        }
+
+        panel.nameFieldStringValue = "rain_settings.json"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let data = try JSONEncoder().encode(settingsStore.currentSettings)
+                try data.write(to: url)
+            } catch {
+                print("Error saving settings to JSON: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Close the Settings Window
+    /// Closes ONLY the settings window (not the entire app).
+    private func closeSettingsWindow() {
+        parentWindow?.close()
+    }
+}
+
+// MARK: - NumericSettingRow
+struct NumericSettingRow: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.headline)
+                .fluorescentNeon()
+
+            Slider(value: $value, in: range, step: step)
+
+            Text(String(format: "%.4f", value))
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+        )
+    }
+}
+
+// MARK: - ToggleSettingRow
+struct ToggleSettingRow: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack {
+            Toggle(title, isOn: $isOn)
+                .toggleStyle(.switch)
+                .fluorescentNeon()
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+        )
+    }
+}
+
+// MARK: - RainSettingsStore
+class RainSettingsStore: ObservableObject {
+    private weak var rainView: RainView?
+
+    @Published var numberOfDrops: Double {
+        didSet { updateRainView { $0.numberOfDrops = Int(numberOfDrops) } }
+    }
+    @Published var speed: Double {
+        didSet { updateRainView { $0.speed = Float(speed) } }
+    }
+    @Published var angle: Double {
+        didSet { updateRainView { $0.angle = Float(angle) } }
+    }
+    @Published var length: Double {
+        didSet { updateRainView { $0.length = Float(length) } }
+    }
+
+    @Published var color: Color {
+        didSet {
+            let nsColor = NSColor(color)
+            updateRainView { $0.color = nsColor }
+        }
+    }
+
+    @Published var windEnabled: Bool {
+        didSet { updateRainView { $0.windEnabled = windEnabled } }
+    }
+    @Published var windIntensity: Double {
+        didSet { updateRainView { $0.windIntensity = Float(windIntensity) } }
+    }
+    @Published var mouseEnabled: Bool {
+        didSet { updateRainView { $0.mouseEnabled = mouseEnabled } }
+    }
+    @Published var mouseInfluenceIntensity: Double {
+        didSet { updateRainView { $0.mouseInfluenceIntensity = Float(mouseInfluenceIntensity) } }
+    }
+
+    init(rainView: RainView?) {
+        self.rainView = rainView
+
+        let settings =
+            rainView?.settings
+            ?? RainSettings(
                 numberOfDrops: 200,
                 speed: 0.005,
                 angle: 30.0,
-                color: NSColor.white,
+                color: .white,
                 length: 0.05,
                 smearFactor: 4.0,
                 splashIntensity: 0.3,
                 windEnabled: true,
                 windIntensity: 0.0001,
                 mouseEnabled: false,
-                mouseInfluenceIntensity: 0.001
+                mouseInfluenceIntensity: 0.001,
+                maxFPS: 30
+            )
+
+        self.numberOfDrops = Double(settings.numberOfDrops)
+        self.speed = Double(settings.speed)
+        self.angle = Double(settings.angle)
+        self.length = Double(settings.length)
+        self.color = Color(settings.color)
+        self.windEnabled = settings.windEnabled
+        self.windIntensity = Double(settings.windIntensity)
+        self.mouseEnabled = settings.mouseEnabled
+        self.mouseInfluenceIntensity = Double(settings.mouseInfluenceIntensity)
+    }
+
+    var currentSettings: RainSettings {
+        RainSettings(
+            numberOfDrops: Int(numberOfDrops),
+            speed: Float(speed),
+            angle: Float(angle),
+            color: NSColor(color),
+            length: Float(length),
+            smearFactor: rainView?.settings.smearFactor ?? 4.0,
+            splashIntensity: rainView?.settings.splashIntensity ?? 0.3,
+            windEnabled: windEnabled,
+            windIntensity: Float(windIntensity),
+            mouseEnabled: mouseEnabled,
+            mouseInfluenceIntensity: Float(mouseInfluenceIntensity),
+            maxFPS: rainView?.settings.maxFPS ?? 30
+        )
+    }
+
+    func updateFrom(_ newSettings: RainSettings) {
+        numberOfDrops = Double(newSettings.numberOfDrops)
+        speed = Double(newSettings.speed)
+        angle = Double(newSettings.angle)
+        length = Double(newSettings.length)
+        color = Color(newSettings.color)
+        windEnabled = newSettings.windEnabled
+        windIntensity = Double(newSettings.windIntensity)
+        mouseEnabled = newSettings.mouseEnabled
+        mouseInfluenceIntensity = Double(newSettings.mouseInfluenceIntensity)
+    }
+
+    private func updateRainView(_ update: (inout RainSettings) -> Void) {
+        guard let rainView = rainView else { return }
+        var settings = rainView.settings
+        update(&settings)
+        rainView.settings = settings
+        rainView.createRaindrops()
+    }
+}
+
+// MARK: - AppDelegate
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var window: NSWindow!
+    var rainView: RainView!
+    var statusItem: NSStatusItem!
+    var settingsWindowController: SettingsWindowController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        setupStatusBarItem()
+
+        guard let screen = NSScreen.main else { return }
+        window = NSWindow(
+            contentRect: screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = .clear
+        window.level = .floating
+        window.ignoresMouseEvents = true
+        window.isOpaque = false
+        window.hasShadow = false
+        window.alphaValue = 1.0
+
+        if let device = MTLCreateSystemDefaultDevice() {
+            let defaultSettings = RainSettings(
+                numberOfDrops: 200,
+                speed: 0.005,
+                angle: 30.0,
+                color: .white,
+                length: 0.05,
+                smearFactor: 4.0,
+                splashIntensity: 0.3,
+                windEnabled: true,
+                windIntensity: 0.0001,
+                mouseEnabled: false,
+                mouseInfluenceIntensity: 0.001,
+                maxFPS: 30
             )
             rainView = RainView(
-                frame: window.contentView!.bounds, device: device, settings: defaultSettings)
+                frame: window.contentView!.bounds,
+                device: device,
+                settings: defaultSettings
+            )
             window.contentView = rainView
             rainView.layer?.isOpaque = false
             rainView.wantsLayer = true
@@ -169,198 +609,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(toggleMenu(_:))
         }
+
         let menu = NSMenu()
         menu.addItem(
             NSMenuItem(
-                title: "Increase Drops", action: #selector(increaseDrops), keyEquivalent: "i"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Decrease Drops", action: #selector(decreaseDrops), keyEquivalent: "d"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Increase Speed", action: #selector(increaseSpeed), keyEquivalent: "s"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Decrease Speed", action: #selector(decreaseSpeed), keyEquivalent: "a"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Increase Angle", action: #selector(increaseAngle), keyEquivalent: "g"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Decrease Angle", action: #selector(decreaseAngle), keyEquivalent: "h"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Increase Length", action: #selector(increaseLength), keyEquivalent: "l"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Decrease Length", action: #selector(decreaseLength), keyEquivalent: "k"))
-        menu.addItem(
-            NSMenuItem(title: "Change Color", action: #selector(changeColor), keyEquivalent: "c"))
-        menu.addItem(
-            NSMenuItem(title: "Toggle Wind", action: #selector(toggleWind), keyEquivalent: "w"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Increase Wind Intensity", action: #selector(increaseWindIntensity),
-                keyEquivalent: "e"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Decrease Wind Intensity", action: #selector(decreaseWindIntensity),
-                keyEquivalent: "f"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Toggle Mouse Influence", action: #selector(toggleMouseInfluence),
-                keyEquivalent: "m"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Increase Mouse Influence", action: #selector(increaseMouseInfluence),
-                keyEquivalent: "r"))
-        menu.addItem(
-            NSMenuItem(
-                title: "Decrease Mouse Influence", action: #selector(decreaseMouseInfluence),
-                keyEquivalent: "t"))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(
-            NSMenuItem(title: "Save Config", action: #selector(saveConfig), keyEquivalent: "o"))
-        menu.addItem(
-            NSMenuItem(title: "Load Config", action: #selector(loadConfig), keyEquivalent: "p"))
+                title: "Settings",
+                action: #selector(showSettings),
+                keyEquivalent: ","
+            )
+        )
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
     }
 
     @objc func toggleMenu(_ sender: Any?) {
-        if let button = statusItem.button {
-            statusItem.menu?.popUp(
-                positioning: nil,
-                at: NSPoint(x: 0, y: button.bounds.height),
-                in: button)
+        // Implement custom behavior if needed
+    }
+
+    @objc func showSettings() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(rainView: rainView)
         }
-    }
-
-    // MARK: - Rain Settings Actions
-
-    @objc func increaseDrops() {
-        rainView.settings.numberOfDrops += 50
-        rainView.createRaindrops()
-    }
-
-    @objc func decreaseDrops() {
-        rainView.settings.numberOfDrops = max(0, rainView.settings.numberOfDrops - 50)
-        rainView.createRaindrops()
-    }
-
-    @objc func increaseSpeed() {
-        rainView.settings.speed += 0.002
-    }
-
-    @objc func decreaseSpeed() {
-        rainView.settings.speed = max(0.002, rainView.settings.speed - 0.002)
-    }
-
-    @objc func increaseAngle() {
-        rainView.settings.angle = min(85.0, rainView.settings.angle + 5)
-        rainView.createRaindrops()
-    }
-
-    @objc func decreaseAngle() {
-        rainView.settings.angle = max(-85.0, rainView.settings.angle - 5)
-        rainView.createRaindrops()
-    }
-
-    @objc func increaseLength() {
-        rainView.settings.length += 0.005
-    }
-
-    @objc func decreaseLength() {
-        rainView.settings.length = max(0.005, rainView.settings.length - 0.005)
-    }
-
-    @objc func changeColor() {
-        let panel = NSColorPanel.shared
-        panel.setTarget(self)
-        panel.setAction(#selector(colorDidChange(_:)))
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    @objc func colorDidChange(_ sender: NSColorPanel) {
-        rainView.settings.color = sender.color
-    }
-
-    @objc func toggleWind() {
-        rainView.settings.windEnabled.toggle()
-        print("Wind enabled: \(rainView.settings.windEnabled)")
-    }
-
-    @objc func increaseWindIntensity() {
-        rainView.settings.windIntensity += 0.0001
-        print("Wind intensity: \(rainView.settings.windIntensity)")
-    }
-
-    @objc func decreaseWindIntensity() {
-        rainView.settings.windIntensity = max(0.00005, rainView.settings.windIntensity - 0.0001)
-        print("Wind intensity: \(rainView.settings.windIntensity)")
-    }
-
-    @objc func toggleMouseInfluence() {
-        rainView.settings.mouseEnabled.toggle()
-        print("Mouse influence enabled: \(rainView.settings.mouseEnabled)")
-    }
-
-    @objc func increaseMouseInfluence() {
-        rainView.settings.mouseInfluenceIntensity += 0.0005
-        print("Mouse influence intensity: \(rainView.settings.mouseInfluenceIntensity)")
-    }
-
-    @objc func decreaseMouseInfluence() {
-        rainView.settings.mouseInfluenceIntensity = max(
-            0.0, rainView.settings.mouseInfluenceIntensity - 0.0005)
-        print("Mouse influence intensity: \(rainView.settings.mouseInfluenceIntensity)")
-    }
-
-    @objc func saveConfig() {
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [UTType.json]
-        savePanel.nameFieldStringValue = "rainConfig.json"
-        savePanel.begin { [weak self] response in
-            if response == .OK, let url = savePanel.url {
-                self?.writeConfig(to: url)
-            }
-        }
-    }
-
-    func writeConfig(to url: URL) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .prettyPrinted
-        do {
-            let data = try encoder.encode(rainView.settings)
-            try data.write(to: url)
-            print("Config saved to \(url.path)")
-        } catch {
-            print("Failed to save config: \(error)")
-        }
-    }
-
-    @objc func loadConfig() {
-        let openPanel = NSOpenPanel()
-        openPanel.allowedContentTypes = [UTType.json]
-        openPanel.begin { [weak self] response in
-            if response == .OK, let url = openPanel.url {
-                self?.readConfig(from: url)
-            }
-        }
-    }
-
-    func readConfig(from url: URL) {
-        let decoder = JSONDecoder()
-        do {
-            let data = try Data(contentsOf: url)
-            let newSettings = try decoder.decode(RainSettings.self, from: data)
-            rainView.settings = newSettings
-            rainView.createRaindrops()
-            print("Config loaded from \(url.path)")
-        } catch {
-            print("Failed to load config: \(error)")
-        }
+        settingsWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func quitApp() {
@@ -383,17 +655,14 @@ class RainView: MTKView {
     private var raindrops: [Raindrop] = []
     private var splashes: [Splash] = []
 
-    // Wind and ambient environment.
+    // Wind and ambient environment
     private var wind: Float = 0.0
     private var ambientColor: SIMD4<Float> = SIMD4<Float>(0.05, 0.05, 0.1, 1.0)
     private var time: Float = 0.0
 
-    // Compute current rain angle (in radians) from settings.angle.
     private var currentAngle: Float {
         return settings.angle * .pi / 180.0
     }
-
-    // MARK: - Types
 
     struct Raindrop {
         var position: SIMD2<Float>
@@ -406,9 +675,9 @@ class RainView: MTKView {
     struct Splash {
         var position: SIMD2<Float>
         var velocity: SIMD2<Float>
-        var life: Float  // Current life remaining
-        var startLife: Float  // For alpha calculation
-        var intensity: Float  // Store the parent drop's intensity
+        var life: Float
+        var startLife: Float
+        var intensity: Float
 
         mutating func update() {
             life -= 0.016
@@ -419,35 +688,32 @@ class RainView: MTKView {
 
         var alpha: Float {
             let norm = max(life / startLife, 0)
-            return norm * norm * intensity  // Multiply by intensity
+            return norm * norm * intensity
         }
     }
 
-    // Uniforms for shader.
     struct RainUniforms {
         var rainColor: SIMD4<Float>
         var ambientColor: SIMD4<Float>
     }
 
-    // Helper: Convert NSColor to SIMD4<Float>
     private func simd4(from color: NSColor) -> SIMD4<Float> {
         guard let rgb = color.usingColorSpace(.deviceRGB) else { return SIMD4<Float>(1, 1, 1, 1) }
         return SIMD4<Float>(
-            Float(rgb.redComponent), Float(rgb.greenComponent), Float(rgb.blueComponent),
-            Float(rgb.alphaComponent))
+            Float(rgb.redComponent),
+            Float(rgb.greenComponent),
+            Float(rgb.blueComponent),
+            Float(rgb.alphaComponent)
+        )
     }
 
-    // New drop position helper – randomizes spawn location based on angle and aspect ratio.
     private func newDropPosition() -> SIMD2<Float> {
         let useAngleBias = abs(settings.angle) > 15
-        let spawnFromSide: Bool
-        if useAngleBias {
-            spawnFromSide = Float.random(in: 0...1) > 0.3  // 70% chance side
-        } else {
-            let aspect = Float(self.bounds.width / self.bounds.height)
-            let pTop = 1 / (1 + aspect)
-            spawnFromSide = Float.random(in: 0...1) > pTop
-        }
+        let spawnFromSide =
+            useAngleBias
+            ? Float.random(in: 0...1) > 0.3
+            : Float.random(in: 0...1) > (1 / (1 + Float(bounds.width / bounds.height)))
+
         if !spawnFromSide {
             let x = Float.random(in: -1...1)
             return SIMD2<Float>(x, 1)
@@ -465,15 +731,13 @@ class RainView: MTKView {
         }
     }
 
-    // MARK: - Initializer
-
     init(frame frameRect: CGRect, device: MTLDevice, settings: RainSettings) {
         self.settings = settings
         super.init(frame: frameRect, device: device)
 
-        self.preferredFramesPerSecond = settings.maxFPS  // Apply FPS setting
+        self.preferredFramesPerSecond = settings.maxFPS
         self.commandQueue = device.makeCommandQueue()
-        self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        self.clearColor = MTLClearColorMake(0, 0, 0, 0)
         self.colorPixelFormat = .bgra8Unorm
         self.framebufferOnly = false
 
@@ -488,25 +752,28 @@ class RainView: MTKView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    // MARK: - Setup Pipeline
-
     private func setupPipeline() {
         guard let device = self.device else { return }
+
         let shaderSource = """
             #include <metal_stdlib>
             using namespace metal;
+
             struct Vertex {
                 float2 position;
                 float alpha;
             };
+
             struct VertexOut {
                 float4 position [[position]];
                 float alpha;
             };
+
             struct RainUniforms {
                 float4 rainColor;
                 float4 ambientColor;
             };
+
             vertex VertexOut vertexShader(uint vertexID [[vertex_id]],
                                           const device Vertex *vertices [[buffer(0)]]) {
                 VertexOut out;
@@ -514,32 +781,35 @@ class RainView: MTKView {
                 out.alpha = vertices[vertexID].alpha;
                 return out;
             }
+
             fragment float4 fragmentShader(VertexOut in [[stage_in]],
-                                            constant RainUniforms &uniforms [[buffer(1)]]) {
+                                           constant RainUniforms &uniforms [[buffer(1)]]) {
                 return (uniforms.rainColor * in.alpha + uniforms.ambientColor);
             }
-            """
+            """.trimmingCharacters(in: .whitespacesAndNewlines)
+
         do {
             let library = try device.makeLibrary(source: shaderSource, options: nil)
             let vertexFunction = library.makeFunction(name: "vertexShader")
             let fragmentFunction = library.makeFunction(name: "fragmentShader")
+
             let pipelineDescriptor = MTLRenderPipelineDescriptor()
             pipelineDescriptor.vertexFunction = vertexFunction
             pipelineDescriptor.fragmentFunction = fragmentFunction
             pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+
             pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
             pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
             pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
             pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
             pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor =
                 .oneMinusSourceAlpha
+
             pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         } catch {
             print("Failed to create pipeline state: \(error)")
         }
     }
-
-    // MARK: - Update Environment
 
     private func updateEnvironment() {
         if settings.windEnabled {
@@ -553,8 +823,6 @@ class RainView: MTKView {
             wind = 0
         }
 
-        // Mouse influence is applied per-drop in the draw() loop.
-
         time += 0.016
         ambientColor = SIMD4<Float>(
             0.05 + 0.01 * sin(time * 0.05),
@@ -564,25 +832,18 @@ class RainView: MTKView {
         )
     }
 
-    // MARK: - Create Raindrops
-
-    // Modify the createRaindrops function
     func createRaindrops() {
         raindrops.removeAll()
         for _ in 0..<settings.numberOfDrops {
             let pos = newDropPosition()
             let special = Float.random(in: 0...1) < 0.01
 
-            // Randomize length more dramatically
             let lengthRange = settings.length * 0.5...settings.length * 2.0
             let randomLength = Float.random(in: lengthRange)
-
-            // Calculate color intensity based on length
-            // Longer drops (closer) are brighter, shorter drops (far) are darker
             let normalizedLength =
                 (randomLength - lengthRange.lowerBound)
                 / (lengthRange.upperBound - lengthRange.lowerBound)
-            let colorIntensity = 0.4 + (normalizedLength * 0.6)  // Range from 0.4 to 1.0
+            let colorIntensity = 0.4 + (normalizedLength * 0.6)
 
             let drop = Raindrop(
                 position: pos,
@@ -595,42 +856,48 @@ class RainView: MTKView {
         }
     }
 
-    // MARK: - Create Splash Particles
-
     private func createSplash(at position: SIMD2<Float>, intensity: Float) {
         let count = Int.random(in: 3...5)
         for _ in 0..<count {
             let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
             let speed = Float.random(in: 0.012...0.024)
-            let vel = SIMD2<Float>(
-                cos(randomAngle) * speed,
-                sin(randomAngle) * speed * 3.0
-            )
+            let vel = SIMD2<Float>(cos(randomAngle) * speed, sin(randomAngle) * speed * 3.0)
             let life = Float.random(in: 0.4...0.8)
             let splash = Splash(
-                position: position, velocity: vel, life: life, startLife: life, intensity: intensity
+                position: position,
+                velocity: vel,
+                life: life,
+                startLife: life,
+                intensity: intensity
             )
             splashes.append(splash)
         }
     }
 
-    // MARK: - Drawing
-
     override func draw(_ dirtyRect: NSRect) {
         updateEnvironment()
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+        guard
+            let commandBuffer = commandQueue.makeCommandBuffer(),
             let renderPassDescriptor = currentRenderPassDescriptor,
             let renderEncoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: renderPassDescriptor)
-        else { return }
+                descriptor: renderPassDescriptor
+            )
+        else {
+            return
+        }
 
         renderEncoder.setRenderPipelineState(pipelineState)
 
         var uniforms = RainUniforms(
-            rainColor: simd4(from: settings.color), ambientColor: ambientColor)
+            rainColor: simd4(from: settings.color),
+            ambientColor: ambientColor
+        )
         renderEncoder.setFragmentBytes(
-            &uniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
+            &uniforms,
+            length: MemoryLayout<RainUniforms>.stride,
+            index: 1
+        )
 
         var raindropVertices: [Vertex] = []
         var splashVertices: [Vertex] = []
@@ -638,11 +905,13 @@ class RainView: MTKView {
         // --- Update and Render Raindrops ---
         for i in 0..<raindrops.count {
             let effectiveSpeed =
-                raindrops[i].isSpecial ? raindrops[i].speed * 0.5 : raindrops[i].speed
+                raindrops[i].isSpecial
+                ? raindrops[i].speed * 0.5
+                : raindrops[i].speed
+
             var dx = sin(currentAngle) * effectiveSpeed + wind
             let dy = -cos(currentAngle) * effectiveSpeed
 
-            // Mouse influence code remains the same
             if settings.mouseEnabled {
                 let globalMouse = NSEvent.mouseLocation
                 if let screen = NSScreen.main {
@@ -660,16 +929,15 @@ class RainView: MTKView {
             raindrops[i].position.y += dy
 
             if raindrops[i].position.y < -1 {
-                // Only create splash if the raindrop is "close" (high intensity)
-                let splashThreshold: Float = 0.85  // Only top 15% intensity drops create splashes
-                if raindrops[i].colorIntensity > splashThreshold {
-                    createSplash(at: raindrops[i].position, intensity: raindrops[i].colorIntensity)
+                if raindrops[i].colorIntensity > 0.85 {
+                    createSplash(
+                        at: raindrops[i].position,
+                        intensity: raindrops[i].colorIntensity
+                    )
                 }
 
                 let pos = newDropPosition()
                 let special = Float.random(in: 0...1) < 0.01
-
-                // When resetting raindrop, also randomize length and color intensity
                 let lengthRange = settings.length * 0.5...settings.length * 2.0
                 let randomLength = Float.random(in: lengthRange)
                 let normalizedLength =
@@ -687,12 +955,10 @@ class RainView: MTKView {
             let dropLength = raindrops[i].length * 0.5
             let dropEnd = raindrops[i].position + dropDir * dropLength
 
-            // Apply color intensity to the alpha value
             let dropAlpha = raindrops[i].colorIntensity
             raindropVertices.append(Vertex(position: raindrops[i].position, alpha: dropAlpha))
             raindropVertices.append(Vertex(position: dropEnd, alpha: dropAlpha))
 
-            // Only create smear effect for high intensity drops
             if raindrops[i].isSpecial && raindrops[i].colorIntensity > 0.85 {
                 let smearLength = raindrops[i].length * settings.smearFactor
                 let smearEnd = raindrops[i].position + dropDir * smearLength
@@ -702,7 +968,7 @@ class RainView: MTKView {
             }
         }
 
-        // Update and Render Splashes
+        // Update & Render Splashes
         for i in 0..<splashes.count {
             splashes[i].update()
         }
@@ -721,31 +987,51 @@ class RainView: MTKView {
             let start = splash.position
             let end = splash.position + offset
             let a = splash.alpha * settings.splashIntensity
+
             splashVertices.append(Vertex(position: start, alpha: a))
             splashVertices.append(Vertex(position: end, alpha: a))
         }
 
+        // --- Encode Raindrops ---
         raindropVertices.withUnsafeBytes { bufferPointer in
             renderEncoder.setVertexBytes(
                 bufferPointer.baseAddress!,
                 length: raindropVertices.count * MemoryLayout<Vertex>.stride,
-                index: 0)
+                index: 0
+            )
         }
         renderEncoder.drawPrimitives(
-            type: .line, vertexStart: 0, vertexCount: raindropVertices.count)
+            type: .line,
+            vertexStart: 0,
+            vertexCount: raindropVertices.count
+        )
 
+        // --- Encode Splashes ---
         splashVertices.withUnsafeBytes { bufferPointer in
             renderEncoder.setVertexBytes(
                 bufferPointer.baseAddress!,
                 length: splashVertices.count * MemoryLayout<Vertex>.stride,
-                index: 0)
+                index: 0
+            )
         }
-        renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: splashVertices.count)
+        renderEncoder.drawPrimitives(
+            type: .line,
+            vertexStart: 0,
+            vertexCount: splashVertices.count
+        )
 
         renderEncoder.endEncoding()
+
         if let drawable = currentDrawable {
             commandBuffer.present(drawable)
         }
         commandBuffer.commit()
     }
+}
+
+// MARK: - Vertex
+
+struct Vertex {
+    var position: SIMD2<Float>
+    var alpha: Float
 }
