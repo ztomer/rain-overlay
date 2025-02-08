@@ -31,6 +31,25 @@ Requirements: Xcode. Tested on MacOs v15.3
 * Raining blood!
 * Nothing at all!
 
+---
+
+## Idea dump
+
+Control panel: Frosted glass with Neon effects. Flickering pentagram when Armageddon mode is on
+Rain - gravity effect - rain accelerated as it falls
+Splashes - cartoon like option (selectable)
+Snow - with accumulation on top of windows (toggle-able)
+Lightning - flashes and across the sky
+Armageddon - blood and skulls
+Wind - limit wind effect so we won't end up with horizontal rain
+
+## Bottom screen effects
+
+* Snowmen
+* Fireflies
+* Puddles and critters
+* Skulls piling in the edges in armageddon mode (skulls can be occasional and use the snow algo)
+
 ## License
 
 * MIT
