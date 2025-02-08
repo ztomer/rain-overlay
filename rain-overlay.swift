@@ -317,9 +317,10 @@ struct SettingsView: View {
                     )
                     .padding(.trailing, 10)
             }
+            .padding(.bottom, 20)  // Added padding
         }
         .padding(30)
-        .frame(width: 800, height: settingsStore.snowEnabled ? 900 : 650)
+        .frame(width: 800, height: settingsStore.snowEnabled ? 750 : 650)  // Increased height
     }
 
     // MARK: JSON Helpers
@@ -436,8 +437,10 @@ class RainSettingsStore: ObservableObject {
     @Published var rainEnabled: Bool { didSet { updateRainView { $0.rainEnabled = rainEnabled } } }
     @Published var snowEnabled: Bool {
         didSet {
-            updateRainView { $0.snowEnabled = snowEnabled }
-            if !snowEnabled { rainView?.destroySnowflakePool() }
+            if let view = rainView {
+                view.settings.snowEnabled = snowEnabled
+                view.resetSnowSystem()  // Encapsulated logic inside RainView.
+            }
         }
     }
     @Published var snowAccumulationThreshold: Double {
@@ -859,8 +862,16 @@ class RainView: MTKView {
         }
     }
 
-    // MARK: Fixed-Size Snowflake Pool Management
+    func resetSnowSystem() {
+        if settings.snowEnabled {
+            initializeSnowflakePool(with: _poolSize)
+            snowPiles = [Float](repeating: -1.0, count: snowPileResolution)
+        } else {
+            destroySnowflakePool()
+        }
+    }
 
+    // MARK: Fixed-Size Snowflake Pool Management
     /// Allocates and initializes the snowflake pool.
     func initializeSnowflakePool(with size: Int) {
         if let pool = _snowflakePool {
@@ -910,7 +921,7 @@ class RainView: MTKView {
     func createSnowflake() -> Snowflake {
         let x = Float.random(in: -1...1)
         let y = 1 + Float.random(in: 0.05...0.15)
-        let size = Float.random(in: 0.01...0.02)
+        let size = Float.random(in: 0.005...0.01)  // Reduced from 0.01...0.02
         let vy = -Float.random(in: 0.001...0.003)
         let vx = Float.random(in: -0.0005...0.0005)
         let wobblePhase = Float.random(in: 0...2 * .pi)
@@ -933,17 +944,16 @@ class RainView: MTKView {
     }
 
     // MARK: Window Accumulation Levels
-
-    /// Computes the target accumulation levels for each horizontal segment based on other windows.
+    // In RainView.swift, modify the computeWindowAccumulationLevels function:
     func computeWindowAccumulationLevels() -> [Float] {
-        var levels = [Float](repeating: -1.0, count: snowPileResolution)
+        var levels = [Float](repeating: maxAccumulation, count: snowPileResolution)  // Changed from -1.0
         if let windowListInfo = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         {
             let myWindowNumber = self.window?.windowNumber
             let screenHeight = NSScreen.main?.frame.height ?? 1.0
             let screenWidth = NSScreen.main?.frame.width ?? 1.0
-            let offset = Float((30.0 / screenHeight) * 2)
+
             for info in windowListInfo {
                 if let ownerName = info[kCGWindowOwnerName as String] as? String,
                     ownerName == "Dock" || ownerName == "Window Server"
@@ -963,16 +973,13 @@ class RainView: MTKView {
                 {
                     let topEdge = y + height
                     let normalizedTop = Float((topEdge / screenHeight) * 2 - 1)
-                    let adjustedTop = normalizedTop - offset
                     let normLeft = Float((x / screenWidth) * 2 - 1)
                     let normRight = Float(((x + width) / screenWidth) * 2 - 1)
+
                     for i in 0..<levels.count {
                         let segX = Float(i) / Float(levels.count - 1) * 2 - 1
                         if segX >= normLeft && segX <= normRight {
-                            // Only accumulate on windows that are low (their top is below 0).
-                            if adjustedTop < 0 {
-                                levels[i] = max(levels[i], adjustedTop)
-                            }
+                            levels[i] = normalizedTop  // Removed offset and condition
                         }
                     }
                 }

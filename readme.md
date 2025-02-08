@@ -50,6 +50,12 @@ Wind - limit wind effect so we won't end up with horizontal rain
 * Puddles and critters
 * Skulls piling in the edges in armageddon mode (skulls can be occasional and use the snow algo)
 
+Problems:
+
+* The snow doesn't accumulate
+* When moving the windows, I want to the accumulated snow to fall down, taking the velocity of the window into account to affect the  trajectory, as physics dictates. Use shaders and Metal to make this viable in terms of performance.
+
+
 ## License
 
 * MIT
