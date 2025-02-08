@@ -35,7 +35,7 @@ Requirements: Xcode. Tested on MacOs v15.3
 
 ## Idea dump
 
-Control panel: Frosted glass with Neon effects. Flickering pentagram when Armageddon mode is on
+Control panel: Flickering pentagram when Armageddon mode is on
 Rain - gravity effect - rain accelerated as it falls
 Splashes - cartoon like option (selectable)
 Snow - with accumulation on top of windows (toggle-able)

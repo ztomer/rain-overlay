@@ -116,21 +116,11 @@ struct RainSettings: Codable {
 class SettingsWindowController: NSWindowController {
     var rainView: RainView
 
+    // NEW: Use the new SettingsWindow initializer that passes the rain view.
     init(rainView: RainView) {
         self.rainView = rainView
-
-        // Create our custom borderless window
-        let window = SettingsWindow()
+        let window = SettingsWindow(rainView: rainView)
         super.init(window: window)
-
-        // Access the SwiftUI hosting view inside the VFX -> HostingView chain
-        if let settingsWindow = window.contentView?.subviews.first?.subviews.first
-            as? NSHostingView<SettingsView>
-        {
-            // Pass the parentWindow reference to the SettingsView so it can close itself
-            let settingsView = SettingsView(rainView: rainView, parentWindow: window)
-            settingsWindow.rootView = settingsView
-        }
     }
 
     required init?(coder: NSCoder) {
@@ -139,11 +129,12 @@ class SettingsWindowController: NSWindowController {
 }
 
 // MARK: - SettingsWindow
+// UPDATED: Instead of creating a SettingsView with nil values, we now pass in the rain view and use self as the parent window.
 class SettingsWindow: NSWindow {
-    init() {
-        // Make window 800×600, borderless, and rounded corners
+    init(rainView: RainView) {
+        let contentRect = NSRect(x: 0, y: 0, width: 800, height: 650)
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            contentRect: contentRect,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -152,7 +143,7 @@ class SettingsWindow: NSWindow {
         self.isMovableByWindowBackground = true
         self.backgroundColor = NSColor.clear
 
-        let visualEffect = NSVisualEffectView()
+        let visualEffect = NSVisualEffectView(frame: contentRect)
         visualEffect.material = .hudWindow
         visualEffect.state = .active
         visualEffect.blendingMode = .behindWindow
@@ -162,15 +153,12 @@ class SettingsWindow: NSWindow {
         visualEffect.layer?.cornerRadius = 20
         visualEffect.layer?.masksToBounds = true
 
-        let settingsView = SettingsView(rainView: nil, parentWindow: nil)
+        // Create SettingsView using the provided rainView and pass self as the parent window.
+        let settingsView = SettingsView(rainView: rainView, parentWindow: self)
         let hostingView = NSHostingView(rootView: settingsView)
-
-        visualEffect.frame = contentView?.bounds ?? .zero
-        visualEffect.autoresizingMask = [.width, .height]
-        visualEffect.addSubview(hostingView)
-
         hostingView.frame = visualEffect.bounds
         hostingView.autoresizingMask = [.width, .height]
+        visualEffect.addSubview(hostingView)
 
         self.contentView = visualEffect
     }
@@ -226,6 +214,7 @@ struct SettingsView: View {
     // A direct reference to the parent NSWindow so we can close it
     let parentWindow: NSWindow?
 
+    // Use the provided rainView and parentWindow.
     init(rainView: RainView?, parentWindow: NSWindow?) {
         self.settingsStore = RainSettingsStore(rainView: rainView)
         self.parentWindow = parentWindow
@@ -340,7 +329,7 @@ struct SettingsView: View {
             }
         }
         .padding(30)
-        .frame(width: 800, height: 600)
+        .frame(width: 800, height: 650)
     }
 
     // MARK: - JSON Load/Save
@@ -462,6 +451,7 @@ class RainSettingsStore: ObservableObject {
 
     @Published var color: Color {
         didSet {
+            // Convert SwiftUI Color to NSColor (assuming this conversion is available)
             let nsColor = NSColor(color)
             updateRainView { $0.color = nsColor }
         }
