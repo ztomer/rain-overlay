@@ -18,6 +18,26 @@ import SwiftUI
 import UniformTypeIdentifiers
 import simd
 
+#if os(macOS)
+    import CoreGraphics
+
+    /// Returns whether the app has screen capture (screen recording) permission.
+    func hasScreenRecordingPermission() -> Bool {
+        return CGPreflightScreenCaptureAccess()
+    }
+
+    /// Requests screen recording permission asynchronously.
+    /// If permission is denied, you can show an alert instructing the user to change it manually.
+    func requestScreenRecordingPermission(completion: @escaping (Bool) -> Void) {
+        // Request permission on a background queue.
+        DispatchQueue.global().async {
+            let granted = CGRequestScreenCaptureAccess()
+            DispatchQueue.main.async {
+                completion(granted)
+            }
+        }
+    }
+#endif
 // MARK: - RainSettings
 
 /// Represents the settings for the rain and snow simulation.
@@ -555,6 +575,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.isOpaque = false
         window.hasShadow = false
         window.alphaValue = 1.0
+
+        #if os(macOS)
+            if !hasScreenRecordingPermission() {
+                requestScreenRecordingPermission { granted in
+                    if !granted {
+                        // Inform the user that permission is required for proper window detection.
+                        let alert = NSAlert()
+                        alert.messageText = "Screen Recording Permission Required"
+                        alert.informativeText = """
+                            This app needs screen recording permission in order to correctly detect window positions so that snow \
+                            accumulates on top of application windows.
+
+                            Please enable this in System Preferences → Security & Privacy → Privacy → Screen Recording.
+                            """
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    }
+                }
+            }
+        #endif
 
         if let device = MTLCreateSystemDefaultDevice() {
             // For testing, enable snow.
