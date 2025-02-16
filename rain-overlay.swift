@@ -9,6 +9,7 @@
 //  Close button on the right. When snow is enabled, the panel height is increased.
 //
 
+import ApplicationServices
 import Cocoa
 import Combine
 import CoreGraphics
@@ -60,10 +61,12 @@ struct RainSettings: Codable {
     /// Set to –1.0 so falling snow remains visible.
     var snowAccumulationThreshold: Float
 
+    var showWindowTops: Bool  // DEBUG
+
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity, windEnabled,
             windIntensity, mouseEnabled, mouseInfluenceIntensity, maxFPS, rainEnabled, snowEnabled,
-            snowAccumulationThreshold
+            snowAccumulationThreshold, showWindowTops
     }
 
     /// Helper structure to encode/decode NSColor.
@@ -88,7 +91,8 @@ struct RainSettings: Codable {
         maxFPS: Int = 30,
         rainEnabled: Bool = true,
         snowEnabled: Bool = false,
-        snowAccumulationThreshold: Float = -1.0
+        snowAccumulationThreshold: Float = -1.0,
+        showWindowTops: Bool = false
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -105,10 +109,12 @@ struct RainSettings: Codable {
         self.rainEnabled = rainEnabled
         self.snowEnabled = snowEnabled
         self.snowAccumulationThreshold = snowAccumulationThreshold
+        self.showWindowTops = showWindowTops
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        //let container = try decoder.container(keyedBy: CodingKeys.self)
         numberOfDrops = try container.decode(Int.self, forKey: .numberOfDrops)
         speed = try container.decode(Float.self, forKey: .speed)
         angle = try container.decode(Float.self, forKey: .angle)
@@ -128,6 +134,7 @@ struct RainSettings: Codable {
         let comps = try container.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
             calibratedRed: comps.red, green: comps.green, blue: comps.blue, alpha: comps.alpha)
+        showWindowTops = try container.decodeIfPresent(Bool.self, forKey: .showWindowTops) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -156,6 +163,7 @@ struct RainSettings: Codable {
         }
         let comps = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
         try container.encode(comps, forKey: .color)
+        try container.encode(showWindowTops, forKey: .showWindowTops)
     }
 }
 
@@ -287,6 +295,7 @@ struct SettingsView: View {
                 ToggleSettingRow(title: "Wind Enabled", isOn: $settingsStore.windEnabled)
                 ToggleSettingRow(title: "Mouse Influence", isOn: $settingsStore.mouseEnabled)
                 ToggleSettingRow(title: "Snow Enabled", isOn: $settingsStore.snowEnabled)
+                ToggleSettingRow(title: "Show Window Tops", isOn: $settingsStore.showWindowTops)
             }
             if settingsStore.snowEnabled {
                 NumericSettingRow(
@@ -469,6 +478,10 @@ class RainSettingsStore: ObservableObject {
         }
     }
 
+    @Published var showWindowTops: Bool {
+        didSet { updateRainView { $0.showWindowTops = showWindowTops } }
+    }
+
     init(rainView: RainView?) {
         self.rainView = rainView
         let settings =
@@ -488,7 +501,9 @@ class RainSettingsStore: ObservableObject {
                 maxFPS: 30,
                 rainEnabled: true,
                 snowEnabled: false,
-                snowAccumulationThreshold: -1.0
+                snowAccumulationThreshold: -1.0,
+                showWindowTops: true
+
             )
         self.numberOfDrops = Double(settings.numberOfDrops)
         self.speed = Double(settings.speed)
@@ -502,6 +517,7 @@ class RainSettingsStore: ObservableObject {
         self.rainEnabled = settings.rainEnabled
         self.snowEnabled = settings.snowEnabled
         self.snowAccumulationThreshold = Double(settings.snowAccumulationThreshold)
+        self.showWindowTops = settings.showWindowTops
     }
 
     var currentSettings: RainSettings {
@@ -537,6 +553,7 @@ class RainSettingsStore: ObservableObject {
         rainEnabled = newSettings.rainEnabled
         snowEnabled = newSettings.snowEnabled
         snowAccumulationThreshold = Double(newSettings.snowAccumulationThreshold)
+        showWindowTops = newSettings.showWindowTops
     }
 
     private func updateRainView(_ update: (inout RainSettings) -> Void) {
@@ -1337,6 +1354,154 @@ extension RainView {
             }
             renderEncoder.drawPrimitives(
                 type: .triangleStrip, vertexStart: 0, vertexCount: accumulationVertices.count)
+        }
+
+        // DEBUG - Draw lines on top of visible windows to debug this
+        if settings.showWindowTops {
+            drawVisibleWindowTopsDebug(renderEncoder: renderEncoder)
+        }
+    }
+
+    private func subtractInterval(_ base: ClosedRange<CGFloat>, _ sub: ClosedRange<CGFloat>)
+        -> [ClosedRange<CGFloat>]
+    {
+        // Compute the intersection.
+        let interLower = max(base.lowerBound, sub.lowerBound)
+        let interUpper = min(base.upperBound, sub.upperBound)
+        if interLower >= interUpper {
+            // No intersection.
+            return [base]
+        }
+        var result: [ClosedRange<CGFloat>] = []
+        if base.lowerBound < interLower {
+            result.append(base.lowerBound...interLower)
+        }
+        if base.upperBound > interUpper {
+            result.append(interUpper...base.upperBound)
+        }
+        return result
+    }
+
+    /// Draws horizontal green debug lines along the visible portions of the tops of windows,
+    /// taking into account occlusions based on z‑ordering.
+    private func drawVisibleWindowTopsDebug(renderEncoder: MTLRenderCommandEncoder) {
+        // Get the main screen’s frame.
+        guard let screenFrame = NSScreen.main?.frame,
+            screenFrame.width > 0, screenFrame.height > 0
+        else {
+            return
+        }
+
+        // Retrieve the on‑screen window info in z‑order.
+        guard
+            let windowListInfo = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID) as? [[String: Any]]
+        else {
+            return
+        }
+
+        // Get our own window number so we can filter it out.
+        let myWindowNumber = self.window?.windowNumber
+
+        // Build an array of windows (with frame and window number). Note: the dictionary’s
+        // "Y" value is in a top‑left coordinate system.
+        var windows: [(number: Int, frame: CGRect)] = []
+        for info in windowListInfo {
+            // Skip system windows.
+            if let owner = info[kCGWindowOwnerName as String] as? String,
+                owner == "Dock" || owner == "Window Server"
+            {
+                continue
+            }
+            // Skip our own overlay.
+            if let windowNumber = info[kCGWindowNumber as String] as? Int,
+                let myNum = myWindowNumber, windowNumber == myNum
+            {
+                continue
+            }
+            if let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                let x = boundsDict["X"] as? CGFloat,
+                let y = boundsDict["Y"] as? CGFloat,
+                let width = boundsDict["Width"] as? CGFloat,
+                let height = boundsDict["Height"] as? CGFloat
+            {
+                let frame = CGRect(x: x, y: y, width: width, height: height)
+                windows.append((number: info[kCGWindowNumber as String] as! Int, frame: frame))
+            }
+        }
+
+        // We'll accumulate debug vertices (each line is two vertices).
+        var debugVertices: [Vertex] = []
+
+        // Process each window in z‑order (frontmost window is at index 0).
+        for (i, window) in windows.enumerated() {
+            let frame = window.frame
+
+            // Convert the CGWindowList’s top‑left coordinate to our normalized coordinate:
+            // In CGWindowList, the "Y" value is measured from the top. So the top edge (in our
+            // desired coordinate system) is:
+            let windowTop = screenFrame.height - frame.origin.y
+            // (Do not add frame.height here because frame.origin.y is already the distance from the top.)
+
+            // Our base horizontal interval is the window’s width.
+            let baseInterval: ClosedRange<CGFloat> = frame.origin.x...(frame.origin.x + frame.width)
+            var visibleIntervals: [ClosedRange<CGFloat>] = [baseInterval]
+
+            // Subtract intervals from windows in front (lower indices) that cover this window’s top.
+            // For a front window, its top (in our coordinates) is:
+            //   frontWindowTop = screenFrame.height - frontFrame.origin.y
+            // and its bottom is:
+            //   frontWindowBottom = frontWindowTop - frontFrame.height.
+            for j in 0..<i {
+                let frontFrame = windows[j].frame
+                let frontWindowTop = screenFrame.height - frontFrame.origin.y
+                let frontWindowBottom = frontWindowTop - frontFrame.height
+
+                // The current window’s top (windowTop) is visible if it is not covered by a front window.
+                if windowTop <= frontWindowTop && windowTop >= frontWindowBottom {
+                    let interferingInterval: ClosedRange<CGFloat> =
+                        frontFrame.origin.x...(frontFrame.origin.x + frontFrame.width)
+                    visibleIntervals = visibleIntervals.flatMap {
+                        subtractInterval($0, interferingInterval)
+                    }
+                }
+            }
+
+            // If any horizontal portions remain visible, convert them to normalized coordinates and add debug lines.
+            if !visibleIntervals.isEmpty {
+                let normalizedY = Float((windowTop / screenFrame.height) * 2 - 1)
+                for interval in visibleIntervals {
+                    let normalizedLeft = Float((interval.lowerBound / screenFrame.width) * 2 - 1)
+                    let normalizedRight = Float((interval.upperBound / screenFrame.width) * 2 - 1)
+                    debugVertices.append(
+                        Vertex(position: SIMD2<Float>(normalizedLeft, normalizedY), alpha: 1.0))
+                    debugVertices.append(
+                        Vertex(position: SIMD2<Float>(normalizedRight, normalizedY), alpha: 1.0))
+                }
+            }
+        }
+
+        // Draw the debug lines if any vertices were added.
+        if !debugVertices.isEmpty {
+            var debugUniforms = RainUniforms(
+                rainColor: SIMD4<Float>(0, 1, 0, 1),  // Bright green.
+                ambientColor: SIMD4<Float>(0, 0, 0, 0)
+            )
+            renderEncoder.setFragmentBytes(
+                &debugUniforms,
+                length: MemoryLayout<RainUniforms>.stride,
+                index: 1)
+            debugVertices.withUnsafeBytes { bufferPointer in
+                renderEncoder.setVertexBytes(
+                    bufferPointer.baseAddress!,
+                    length: debugVertices.count * MemoryLayout<Vertex>.stride,
+                    index: 0)
+            }
+            renderEncoder.drawPrimitives(
+                type: .line,
+                vertexStart: 0,
+                vertexCount: debugVertices.count)
         }
     }
 }
