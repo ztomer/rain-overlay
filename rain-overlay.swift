@@ -2,11 +2,11 @@
 //  RainOverlay.swift
 //  Example macOS SwiftUI app
 //
-//  This file implements a rain and snow overlay using Metal and SwiftUI.
-//  It includes a settings UI, a custom Metal view (RainView) that simulates rain
-//  and snow (with accumulation), and uses a fixed‑size heap‑allocated pool for
-//  snowflake state. The settings panel now includes a GitHub link on the left and a
-//  Close button on the right. When snow is enabled, the panel height is increased.
+//  This file implements a rain & snow overlay using Metal and SwiftUI,
+//  with window-top collision detection. Each window cycles its own debug color only
+//  when a snowflake hits it.
+//
+//  Includes extra debug prints + larger snowflakes to help confirm things are working.
 //
 
 import ApplicationServices
@@ -28,9 +28,7 @@ import simd
     }
 
     /// Requests screen recording permission asynchronously.
-    /// If permission is denied, you can show an alert instructing the user to change it manually.
     func requestScreenRecordingPermission(completion: @escaping (Bool) -> Void) {
-        // Request permission on a background queue.
         DispatchQueue.global().async {
             let granted = CGRequestScreenCaptureAccess()
             DispatchQueue.main.async {
@@ -39,9 +37,9 @@ import simd
         }
     }
 #endif
+
 // MARK: - RainSettings
 
-/// Represents the settings for the rain and snow simulation.
 struct RainSettings: Codable {
     var numberOfDrops: Int
     var speed: Float
@@ -57,11 +55,8 @@ struct RainSettings: Codable {
     var maxFPS: Int
     var rainEnabled: Bool
     var snowEnabled: Bool
-    /// The base snow accumulation threshold (normalized –1 = bottom, 1 = top).
-    /// Set to –1.0 so falling snow remains visible.
     var snowAccumulationThreshold: Float
-
-    var showWindowTops: Bool  // DEBUG
+    var showWindowTops: Bool
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity, windEnabled,
@@ -69,12 +64,9 @@ struct RainSettings: Codable {
             snowAccumulationThreshold, showWindowTops
     }
 
-    /// Helper structure to encode/decode NSColor.
     struct ColorComponents: Codable {
         var red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat
     }
-
-    // MARK: Initializers
 
     init(
         numberOfDrops: Int,
@@ -92,7 +84,7 @@ struct RainSettings: Codable {
         rainEnabled: Bool = true,
         snowEnabled: Bool = false,
         snowAccumulationThreshold: Float = -1.0,
-        showWindowTops: Bool = false
+        showWindowTops: Bool = true
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -113,46 +105,45 @@ struct RainSettings: Codable {
     }
 
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        //let container = try decoder.container(keyedBy: CodingKeys.self)
-        numberOfDrops = try container.decode(Int.self, forKey: .numberOfDrops)
-        speed = try container.decode(Float.self, forKey: .speed)
-        angle = try container.decode(Float.self, forKey: .angle)
-        length = try container.decode(Float.self, forKey: .length)
-        smearFactor = try container.decode(Float.self, forKey: .smearFactor)
-        splashIntensity = try container.decode(Float.self, forKey: .splashIntensity)
-        windEnabled = try container.decode(Bool.self, forKey: .windEnabled)
-        windIntensity = try container.decode(Float.self, forKey: .windIntensity)
-        mouseEnabled = try container.decode(Bool.self, forKey: .mouseEnabled)
-        mouseInfluenceIntensity = try container.decode(Float.self, forKey: .mouseInfluenceIntensity)
-        maxFPS = try container.decodeIfPresent(Int.self, forKey: .maxFPS) ?? 30
-        rainEnabled = try container.decodeIfPresent(Bool.self, forKey: .rainEnabled) ?? true
-        snowEnabled = try container.decodeIfPresent(Bool.self, forKey: .snowEnabled) ?? false
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        numberOfDrops = try c.decode(Int.self, forKey: .numberOfDrops)
+        speed = try c.decode(Float.self, forKey: .speed)
+        angle = try c.decode(Float.self, forKey: .angle)
+        length = try c.decode(Float.self, forKey: .length)
+        smearFactor = try c.decode(Float.self, forKey: .smearFactor)
+        splashIntensity = try c.decode(Float.self, forKey: .splashIntensity)
+        windEnabled = try c.decode(Bool.self, forKey: .windEnabled)
+        windIntensity = try c.decode(Float.self, forKey: .windIntensity)
+        mouseEnabled = try c.decode(Bool.self, forKey: .mouseEnabled)
+        mouseInfluenceIntensity = try c.decode(Float.self, forKey: .mouseInfluenceIntensity)
+        maxFPS = try c.decodeIfPresent(Int.self, forKey: .maxFPS) ?? 30
+        rainEnabled = try c.decodeIfPresent(Bool.self, forKey: .rainEnabled) ?? true
+        snowEnabled = try c.decodeIfPresent(Bool.self, forKey: .snowEnabled) ?? false
         snowAccumulationThreshold =
-            try container.decodeIfPresent(Float.self, forKey: .snowAccumulationThreshold) ?? -1.0
+            try c.decodeIfPresent(Float.self, forKey: .snowAccumulationThreshold) ?? -1.0
 
-        let comps = try container.decode(ColorComponents.self, forKey: .color)
+        let comps = try c.decode(ColorComponents.self, forKey: .color)
         color = NSColor(
             calibratedRed: comps.red, green: comps.green, blue: comps.blue, alpha: comps.alpha)
-        showWindowTops = try container.decodeIfPresent(Bool.self, forKey: .showWindowTops) ?? false
+        showWindowTops = try c.decodeIfPresent(Bool.self, forKey: .showWindowTops) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(numberOfDrops, forKey: .numberOfDrops)
-        try container.encode(speed, forKey: .speed)
-        try container.encode(angle, forKey: .angle)
-        try container.encode(length, forKey: .length)
-        try container.encode(smearFactor, forKey: .smearFactor)
-        try container.encode(splashIntensity, forKey: .splashIntensity)
-        try container.encode(windEnabled, forKey: .windEnabled)
-        try container.encode(windIntensity, forKey: .windIntensity)
-        try container.encode(mouseEnabled, forKey: .mouseEnabled)
-        try container.encode(mouseInfluenceIntensity, forKey: .mouseInfluenceIntensity)
-        try container.encode(maxFPS, forKey: .maxFPS)
-        try container.encode(rainEnabled, forKey: .rainEnabled)
-        try container.encode(snowEnabled, forKey: .snowEnabled)
-        try container.encode(snowAccumulationThreshold, forKey: .snowAccumulationThreshold)
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(numberOfDrops, forKey: .numberOfDrops)
+        try c.encode(speed, forKey: .speed)
+        try c.encode(angle, forKey: .angle)
+        try c.encode(length, forKey: .length)
+        try c.encode(smearFactor, forKey: .smearFactor)
+        try c.encode(splashIntensity, forKey: .splashIntensity)
+        try c.encode(windEnabled, forKey: .windEnabled)
+        try c.encode(windIntensity, forKey: .windIntensity)
+        try c.encode(mouseEnabled, forKey: .mouseEnabled)
+        try c.encode(mouseInfluenceIntensity, forKey: .mouseInfluenceIntensity)
+        try c.encode(maxFPS, forKey: .maxFPS)
+        try c.encode(rainEnabled, forKey: .rainEnabled)
+        try c.encode(snowEnabled, forKey: .snowEnabled)
+        try c.encode(snowAccumulationThreshold, forKey: .snowAccumulationThreshold)
 
         var red: CGFloat = 0
         var green: CGFloat = 0
@@ -162,14 +153,13 @@ struct RainSettings: Codable {
             rgb.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
         }
         let comps = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
-        try container.encode(comps, forKey: .color)
-        try container.encode(showWindowTops, forKey: .showWindowTops)
+        try c.encode(comps, forKey: .color)
+        try c.encode(showWindowTops, forKey: .showWindowTops)
     }
 }
 
-// MARK: - Settings Window & Controller
+// MARK: - Settings Window
 
-/// A custom NSWindowController hosting the settings view.
 class SettingsWindowController: NSWindowController {
     var rainView: RainView
     init(rainView: RainView) {
@@ -180,10 +170,9 @@ class SettingsWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
-/// A custom NSWindow that displays the settings using a visual effect.
 class SettingsWindow: NSWindow {
     init(rainView: RainView) {
-        let contentRect = NSRect(x: 0, y: 0, width: 800, height: 650)  // Base height; controlled by the SwiftUI view.
+        let contentRect = NSRect(x: 0, y: 0, width: 800, height: 650)
         super.init(
             contentRect: contentRect, styleMask: [.borderless], backing: .buffered, defer: false)
         self.isMovableByWindowBackground = true
@@ -208,7 +197,6 @@ class SettingsWindow: NSWindow {
 
 // MARK: - Neon Text Modifier
 
-/// Applies a neon flickering effect to text.
 struct FluorescentNeonText: ViewModifier {
     @State private var flickerFactor: CGFloat = 1.0
     @State private var timer: Timer?
@@ -249,8 +237,6 @@ extension View {
 
 // MARK: - Settings View
 
-/// The SwiftUI view for adjusting simulation settings.
-/// When snow is enabled, the panel height is increased to 900.
 struct SettingsView: View {
     @ObservedObject var settingsStore: RainSettingsStore
     let parentWindow: NSWindow?
@@ -325,7 +311,6 @@ struct SettingsView: View {
 
             Spacer()
 
-            // Lower controls: GitHub link on the left and Close button on the right.
             HStack {
                 Link("GitHub", destination: URL(string: "https://github.com/ztomer/rain-overlay")!)
                     .fluorescentNeon()
@@ -346,13 +331,11 @@ struct SettingsView: View {
                     )
                     .padding(.trailing, 10)
             }
-            .padding(.bottom, 20)  // Added padding
+            .padding(.bottom, 20)
         }
         .padding(30)
-        .frame(width: 800, height: settingsStore.snowEnabled ? 750 : 650)  // Increased height
+        .frame(width: 800, height: settingsStore.snowEnabled ? 750 : 650)
     }
-
-    // MARK: JSON Helpers
 
     private func loadFromJSON() {
         let panel = NSOpenPanel()
@@ -442,7 +425,6 @@ struct ToggleSettingRow: View {
 
 // MARK: - RainSettingsStore
 
-/// An observable object that holds the simulation settings and updates the RainView.
 class RainSettingsStore: ObservableObject {
     private weak var rainView: RainView?
 
@@ -468,7 +450,7 @@ class RainSettingsStore: ObservableObject {
         didSet {
             if let view = rainView {
                 view.settings.snowEnabled = snowEnabled
-                view.resetSnowSystem()  // Encapsulated logic inside RainView.
+                view.resetSnowSystem()
             }
         }
     }
@@ -477,14 +459,13 @@ class RainSettingsStore: ObservableObject {
             updateRainView { $0.snowAccumulationThreshold = Float(snowAccumulationThreshold) }
         }
     }
-
     @Published var showWindowTops: Bool {
         didSet { updateRainView { $0.showWindowTops = showWindowTops } }
     }
 
     init(rainView: RainView?) {
         self.rainView = rainView
-        let settings =
+        let s =
             rainView?.settings
             ?? RainSettings(
                 numberOfDrops: 200,
@@ -503,21 +484,20 @@ class RainSettingsStore: ObservableObject {
                 snowEnabled: false,
                 snowAccumulationThreshold: -1.0,
                 showWindowTops: true
-
             )
-        self.numberOfDrops = Double(settings.numberOfDrops)
-        self.speed = Double(settings.speed)
-        self.angle = Double(settings.angle)
-        self.length = Double(settings.length)
-        self.color = Color(settings.color)
-        self.windEnabled = settings.windEnabled
-        self.windIntensity = Double(settings.windIntensity)
-        self.mouseEnabled = settings.mouseEnabled
-        self.mouseInfluenceIntensity = Double(settings.mouseInfluenceIntensity)
-        self.rainEnabled = settings.rainEnabled
-        self.snowEnabled = settings.snowEnabled
-        self.snowAccumulationThreshold = Double(settings.snowAccumulationThreshold)
-        self.showWindowTops = settings.showWindowTops
+        numberOfDrops = Double(s.numberOfDrops)
+        speed = Double(s.speed)
+        angle = Double(s.angle)
+        length = Double(s.length)
+        color = Color(s.color)
+        windEnabled = s.windEnabled
+        windIntensity = Double(s.windIntensity)
+        mouseEnabled = s.mouseEnabled
+        mouseInfluenceIntensity = Double(s.mouseInfluenceIntensity)
+        rainEnabled = s.rainEnabled
+        snowEnabled = s.snowEnabled
+        snowAccumulationThreshold = Double(s.snowAccumulationThreshold)
+        showWindowTops = s.showWindowTops
     }
 
     var currentSettings: RainSettings {
@@ -536,7 +516,8 @@ class RainSettingsStore: ObservableObject {
             maxFPS: rainView?.settings.maxFPS ?? 30,
             rainEnabled: rainEnabled,
             snowEnabled: snowEnabled,
-            snowAccumulationThreshold: Float(snowAccumulationThreshold)
+            snowAccumulationThreshold: Float(snowAccumulationThreshold),
+            showWindowTops: showWindowTops
         )
     }
 
@@ -557,17 +538,16 @@ class RainSettingsStore: ObservableObject {
     }
 
     private func updateRainView(_ update: (inout RainSettings) -> Void) {
-        guard let rainView = rainView else { return }
-        var settings = rainView.settings
-        update(&settings)
-        rainView.settings = settings
-        rainView.createRaindrops()
+        guard let rv = rainView else { return }
+        var s = rv.settings
+        update(&s)
+        rv.settings = s
+        rv.createRaindrops()
     }
 }
 
 // MARK: - AppDelegate
 
-/// The application delegate sets up the main window, status bar, and simulation view.
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var rainView: RainView!
@@ -597,12 +577,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !hasScreenRecordingPermission() {
                 requestScreenRecordingPermission { granted in
                     if !granted {
-                        // Inform the user that permission is required for proper window detection.
                         let alert = NSAlert()
                         alert.messageText = "Screen Recording Permission Required"
                         alert.informativeText = """
-                            This app needs screen recording permission in order to correctly detect window positions so that snow \
-                            accumulates on top of application windows.
+                            This app needs screen recording permission in order to detect window positions
+                            so that snow accumulates on top of application windows.
 
                             Please enable this in System Preferences → Security & Privacy → Privacy → Screen Recording.
                             """
@@ -615,7 +594,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
 
         if let device = MTLCreateSystemDefaultDevice() {
-            // For testing, enable snow.
             let defaultSettings = RainSettings(
                 numberOfDrops: 200,
                 speed: 0.005,
@@ -673,70 +651,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Vertex
 
-/// A vertex used for rendering, with a 2D position and alpha value.
 struct Vertex {
     var position: SIMD2<Float>
     var alpha: Float
 }
 
-// MARK: - Snowflake Structures
+// MARK: - Snowflake
 
-/// Basic data for a snowflake.
 struct Snowflake {
     var position: SIMD2<Float>
     var velocity: SIMD2<Float>
     var size: Float
-    var wobblePhase: Float  // For side-to-side motion.
-    var wobbleAmplitude: Float  // Magnitude of wobble.
+    var wobblePhase: Float
+    var wobbleAmplitude: Float
 }
 
-/// State for a snowflake including rendering parameters.
 struct SnowflakeState {
     var flake: Snowflake
-    var opacity: Float  // Fade-in/out value.
-    var rotation: Float  // Rotation angle.
-    var isActive: Bool  // Whether this snowflake is currently active.
+    var opacity: Float
+    var rotation: Float
+    var isActive: Bool
+}
+
+// MARK: - WindowSegment
+
+private struct WindowSegment {
+    var topY: Float
+    var windowID: Int?
 }
 
 // MARK: - RainView
 
-/// A custom MTKView that renders rain and snow (with accumulation) using Metal.
 class RainView: MTKView {
-    // Simulation settings.
     var settings: RainSettings {
         didSet { self.preferredFramesPerSecond = settings.maxFPS }
     }
 
-    // Metal objects.
     private var commandQueue: MTLCommandQueue!
     private var pipelineState: MTLRenderPipelineState!
 
-    // Rain simulation.
+    // Raindrops
     private var raindrops: [Raindrop] = []
     private var splashes: [Splash] = []
 
-    // Snow accumulation.
-    /// An array representing the current accumulated snow height for each horizontal segment.
+    // Snow
     private var snowPiles: [Float] = []
-    /// The number of horizontal segments used for accumulation.
     private let snowPileResolution: Int = 100
-    /// The maximum accumulation level – snow will accumulate up to this value.
     private let maxAccumulation: Float = -0.8
 
-    // Ambient environment.
     private var wind: Float = 0.0
-    private var ambientColor: SIMD4<Float> = SIMD4<Float>(0.05, 0.05, 0.1, 1.0)
+    private var ambientColor = SIMD4<Float>(0.05, 0.05, 0.1, 1.0)
     private var time: Float = 0.0
     private var currentAngle: Float { settings.angle * .pi / 180.0 }
 
-    // MARK: Fixed-Size Snowflake Pool
-
-    /// Number of slots in the snowflake pool.
+    // Snowflake Pool
     private var _poolSize: Int = 200
-    /// The heap-allocated fixed-size pool for snowflake states.
     private var _snowflakePool: UnsafeMutableBufferPointer<SnowflakeState>?
-
-    // MARK: Rain Structures
 
     struct Raindrop {
         var position: SIMD2<Float>
@@ -745,7 +715,6 @@ class RainView: MTKView {
         var isSpecial: Bool
         var colorIntensity: Float
     }
-
     struct Splash {
         var position: SIMD2<Float>
         var velocity: SIMD2<Float>
@@ -764,18 +733,32 @@ class RainView: MTKView {
             return norm * norm * intensity
         }
     }
-
-    /// Uniforms for the Metal shader.
     struct RainUniforms {
         var rainColor: SIMD4<Float>
         var ambientColor: SIMD4<Float>
     }
 
-    // MARK: Initialization
+    // NEW: Per-window color index
+    private var windowColorMap: [Int: Int] = [:]
+    private let debugColors: [NSColor] = [
+        .systemRed, .systemGreen, .systemBlue, .systemYellow, .systemPurple, .systemOrange,
+    ]
 
-    init(frame frameRect: CGRect, device: MTLDevice, settings: RainSettings) {
+    private func colorForWindowID(_ windowID: Int) -> NSColor {
+        let idx = windowColorMap[windowID] ?? 0
+        return debugColors[idx % debugColors.count]
+    }
+    private func cycleColor(forWindow windowID: Int) {
+        let oldIndex = windowColorMap[windowID] ?? 0
+        let newIndex = (oldIndex + 1) % debugColors.count
+        windowColorMap[windowID] = newIndex
+    }
+
+    // MARK: Init
+
+    init(frame: CGRect, device: MTLDevice, settings: RainSettings) {
         self.settings = settings
-        super.init(frame: frameRect, device: device)
+        super.init(frame: frame, device: device)
         self.preferredFramesPerSecond = settings.maxFPS
         self.commandQueue = device.makeCommandQueue()
         self.clearColor = MTLClearColorMake(0, 0, 0, 0)
@@ -785,24 +768,17 @@ class RainView: MTKView {
         setupPipeline()
         createRaindrops()
 
-        // Initialize snow accumulation to ground level (-1.0 everywhere).
         if settings.snowEnabled {
             snowPiles = [Float](repeating: -1.0, count: snowPileResolution)
         }
-
         self.enableSetNeedsDisplay = true
         self.isPaused = false
-
-        // Allocate the fixed-size pool for snowflakes.
         initializeSnowflakePool(with: _poolSize)
     }
 
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     deinit { destroySnowflakePool() }
 
-    // MARK: Metal Pipeline Setup
-
-    /// Sets up the Metal render pipeline.
     private func setupPipeline() {
         guard let device = self.device else { return }
         let shaderSource = """
@@ -832,30 +808,40 @@ class RainView: MTKView {
                 return (uniforms.rainColor * in.alpha + uniforms.ambientColor);
             }
             """.trimmingCharacters(in: .whitespacesAndNewlines)
+
         do {
             let library = try device.makeLibrary(source: shaderSource, options: nil)
             let vertexFunction = library.makeFunction(name: "vertexShader")
             let fragmentFunction = library.makeFunction(name: "fragmentShader")
-            let pipelineDescriptor = MTLRenderPipelineDescriptor()
-            pipelineDescriptor.vertexFunction = vertexFunction
-            pipelineDescriptor.fragmentFunction = fragmentFunction
-            pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-            pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
-            pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-            pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-            pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
-            pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor =
-                .oneMinusSourceAlpha
-            pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = vertexFunction
+            desc.fragmentFunction = fragmentFunction
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            desc.colorAttachments[0].isBlendingEnabled = true
+            desc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            desc.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+            desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            pipelineState = try device.makeRenderPipelineState(descriptor: desc)
         } catch {
             print("Failed to create pipeline state: \(error)")
         }
     }
 
-    // MARK: Environment & Rain Updates
+    // MARK: - Raindrops
 
-    /// Updates wind and ambient color.
     private func updateEnvironment() {
+        windEnabledLogic()
+        time += 0.016
+        ambientColor = SIMD4<Float>(
+            0.05 + 0.01 * sin(time * 0.05),
+            0.05 + 0.01 * sin(time * 0.05 + 2.0),
+            0.1 + 0.01 * sin(time * 0.05 + 4.0),
+            1.0
+        )
+    }
+
+    private func windEnabledLogic() {
         if settings.windEnabled {
             wind += Float.random(in: -settings.windIntensity...settings.windIntensity)
             wind = min(max(wind, -0.003), 0.003)
@@ -866,16 +852,8 @@ class RainView: MTKView {
         } else {
             wind = 0
         }
-        time += 0.016
-        ambientColor = SIMD4<Float>(
-            0.05 + 0.01 * sin(time * 0.05),
-            0.05 + 0.01 * sin(time * 0.05 + 2.0),
-            0.1 + 0.01 * sin(time * 0.05 + 4.0),
-            1.0
-        )
     }
 
-    /// Creates the raindrop array based on the settings.
     func createRaindrops() {
         raindrops.removeAll()
         if settings.rainEnabled {
@@ -883,15 +861,15 @@ class RainView: MTKView {
                 let pos = newDropPosition()
                 let special = Float.random(in: 0...1) < 0.01
                 let lengthRange = settings.length * 0.5...settings.length * 2.0
-                let randomLength = Float.random(in: lengthRange)
-                let normalizedLength =
-                    (randomLength - lengthRange.lowerBound)
+                let randLen = Float.random(in: lengthRange)
+                let normalizedLen =
+                    (randLen - lengthRange.lowerBound)
                     / (lengthRange.upperBound - lengthRange.lowerBound)
-                let colorIntensity = 0.4 + (normalizedLength * 0.6)
+                let colorIntensity = 0.4 + (normalizedLen * 0.6)
                 let drop = Raindrop(
                     position: pos,
                     speed: Float.random(in: settings.speed...(settings.speed * 2)),
-                    length: randomLength,
+                    length: randLen,
                     isSpecial: special,
                     colorIntensity: colorIntensity
                 )
@@ -900,13 +878,13 @@ class RainView: MTKView {
         }
     }
 
-    /// Computes a new random spawn position for a raindrop.
     private func newDropPosition() -> SIMD2<Float> {
         let useAngleBias = abs(settings.angle) > 15
         let spawnFromSide =
             useAngleBias
             ? Float.random(in: 0...1) > 0.3
             : Float.random(in: 0...1) > (1 / (1 + Float(bounds.width / bounds.height)))
+
         if !spawnFromSide {
             let x = Float.random(in: -1...1)
             return SIMD2<Float>(x, 1)
@@ -929,8 +907,8 @@ class RainView: MTKView {
         }
     }
 
-    // MARK: Fixed-Size Snowflake Pool Management
-    /// Allocates and initializes the snowflake pool.
+    // MARK: - Snowflake Pool
+
     func initializeSnowflakePool(with size: Int) {
         if let pool = _snowflakePool {
             pool.baseAddress?.deinitialize(count: pool.count)
@@ -952,10 +930,10 @@ class RainView: MTKView {
         _snowflakePool = UnsafeMutableBufferPointer(start: pointer, count: size)
     }
 
-    /// Reinitializes the pool with a new size.
-    func reinitializeSnowflakePool(newSize: Int) { initializeSnowflakePool(with: newSize) }
+    func reinitializeSnowflakePool(newSize: Int) {
+        initializeSnowflakePool(with: newSize)
+    }
 
-    /// Returns the index of a free (inactive) slot.
     func findFreeSlotInPool() -> Int? {
         guard let pool = _snowflakePool else { return nil }
         for i in 0..<pool.count {
@@ -964,7 +942,6 @@ class RainView: MTKView {
         return nil
     }
 
-    /// Destroys the snowflake pool.
     func destroySnowflakePool() {
         if let pool = _snowflakePool {
             pool.baseAddress?.deinitialize(count: pool.count)
@@ -973,17 +950,19 @@ class RainView: MTKView {
         }
     }
 
-    // MARK: Snowflake Creation & Clearing
+    // MARK: - Snowflake Creation
 
-    /// Creates a new snowflake positioned above the top.
+    /// Larger flake size for easy visibility + debug print
     func createSnowflake() -> Snowflake {
-        let x = Float.random(in: -1...1)
-        let y = 1 + Float.random(in: 0.05...0.15)
-        let size = Float.random(in: 0.005...0.01)  // Reduced from 0.01...0.02
+        let x = Float.random(in: -0.5...0.5)  // spawn near center horizontally
+        let y: Float = 1.1  // just above top
+        let size: Float = Float.random(in: 0.01...0.02)  // bigger flakes
         let vy = -Float.random(in: 0.001...0.003)
         let vx = Float.random(in: -0.0005...0.0005)
-        let wobblePhase = Float.random(in: 0...2 * .pi)
+        let wobblePhase = Float.random(in: 0..<(2 * .pi))
         let wobbleAmplitude = Float.random(in: 0.0001...0.0003)
+        print("Creating new snowflake at (\(x), \(y)), size=\(size)")  // debug
+
         return Snowflake(
             position: SIMD2<Float>(x, y),
             velocity: SIMD2<Float>(vx, vy),
@@ -993,7 +972,6 @@ class RainView: MTKView {
         )
     }
 
-    /// Deactivates all snowflakes and resets snow accumulation.
     func clearSnow() {
         if let pool = _snowflakePool {
             for i in 0..<pool.count { pool[i].isActive = false }
@@ -1001,82 +979,104 @@ class RainView: MTKView {
         snowPiles = [Float](repeating: -1.0, count: snowPileResolution)
     }
 
-    // MARK: Window Accumulation Levels
-    // In RainView.swift, modify the computeWindowAccumulationLevels function:
-    func computeWindowAccumulationLevels() -> [Float] {
-        var levels = [Float](repeating: maxAccumulation, count: snowPileResolution)  // Changed from -1.0
-        if let windowListInfo = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
-        {
-            let myWindowNumber = self.window?.windowNumber
-            let screenHeight = NSScreen.main?.frame.height ?? 1.0
-            let screenWidth = NSScreen.main?.frame.width ?? 1.0
+    // MARK: - WindowSegments
 
-            for info in windowListInfo {
-                if let ownerName = info[kCGWindowOwnerName as String] as? String,
-                    ownerName == "Dock" || ownerName == "Window Server"
-                {
+    fileprivate func computeWindowAccumulationLevels() -> [WindowSegment] {
+        var segments = [WindowSegment](
+            repeating: WindowSegment(topY: maxAccumulation, windowID: nil),
+            count: snowPileResolution
+        )
+
+        guard
+            let windowListInfo = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID
+            ) as? [[String: Any]]
+        else {
+            return segments
+        }
+
+        let screenHeight = NSScreen.main?.frame.height ?? 1.0
+        let screenWidth = NSScreen.main?.frame.width ?? 1.0
+        let myWindowNumber = self.window?.windowNumber
+
+        for info in windowListInfo {
+            if let ownerName = info[kCGWindowOwnerName as String] as? String {
+                // Skip some known processes that are not real windows
+                if ownerName == "Dock" || ownerName == "Window Server" {
                     continue
                 }
-                if let windowNumber = info[kCGWindowNumber as String] as? Int,
-                    windowNumber == myWindowNumber
-                {
-                    continue
-                }
-                if let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
-                    let x = boundsDict["X"] as? CGFloat,
-                    let y = boundsDict["Y"] as? CGFloat,
-                    let width = boundsDict["Width"] as? CGFloat,
-                    let height = boundsDict["Height"] as? CGFloat
-                {
-                    let topEdge = y + height
-                    let normalizedTop = Float((topEdge / screenHeight) * 2 - 1)
-                    let normLeft = Float((x / screenWidth) * 2 - 1)
-                    let normRight = Float(((x + width) / screenWidth) * 2 - 1)
+            }
 
-                    for i in 0..<levels.count {
-                        let segX = Float(i) / Float(levels.count - 1) * 2 - 1
-                        if segX >= normLeft && segX <= normRight {
-                            levels[i] = normalizedTop  // Removed offset and condition
-                        }
+            // NEW: Skip overlay windows by layer
+            if let layer = info[kCGWindowLayer as String] as? Int, layer > 0 {
+                continue
+            }
+
+            guard
+                let windowNumber = info[kCGWindowNumber as String] as? Int,
+                windowNumber != myWindowNumber,
+                let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                let x = boundsDict["X"] as? CGFloat,
+                let y = boundsDict["Y"] as? CGFloat,
+                let w = boundsDict["Width"] as? CGFloat
+                // let h = boundsDict["Height"] as? CGFloat
+            else {
+                continue
+            }
+
+            // top in mac coords is 'y'
+            let normTop = Float((1.0 - (y / screenHeight)) * 2.0 - 1.0)
+            let normLeft = Float((x / screenWidth) * 2.0 - 1.0)
+            let normRight = Float(((x + w) / screenWidth) * 2.0 - 1.0)
+
+            for i in 0..<segments.count {
+                let segX = Float(i) / Float(segments.count - 1) * 2.0 - 1.0
+                if segX >= normLeft && segX <= normRight {
+                    if normTop > segments[i].topY {
+                        segments[i].topY = normTop
+                        segments[i].windowID = windowNumber
                     }
                 }
             }
         }
-        return levels
+        return segments
     }
 
-    // MARK: Draw Loop
+    // MARK: - Draw
 
-    /// The main drawing routine.
     override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        // Debug: confirm draw is called
+        print("draw(_:) called - updating environment, drawing frame.")
+
         updateEnvironment()
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-            let renderPassDescriptor = currentRenderPassDescriptor,
-            let renderEncoder = commandBuffer.makeRenderCommandEncoder(
-                descriptor: renderPassDescriptor)
-        else { return }
-
-        renderEncoder.setRenderPipelineState(pipelineState)
+        guard
+            let commandBuffer = commandQueue.makeCommandBuffer(),
+            let rpd = currentRenderPassDescriptor,
+            let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: rpd)
+        else {
+            return
+        }
+        encoder.setRenderPipelineState(pipelineState)
 
         var uniforms = RainUniforms(
             rainColor: simd4(from: settings.color),
             ambientColor: ambientColor
         )
-        renderEncoder.setFragmentBytes(
-            &uniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
 
-        // --- Rain & Splash Rendering ---
+        // RAIN
         var raindropVertices: [Vertex] = []
         var splashVertices: [Vertex] = []
 
         if settings.rainEnabled {
             for i in 0..<raindrops.count {
-                let effectiveSpeed =
+                let effSpeed =
                     raindrops[i].isSpecial ? raindrops[i].speed * 0.5 : raindrops[i].speed
-                var dx = sin(currentAngle) * effectiveSpeed + wind
-                let dy = -cos(currentAngle) * effectiveSpeed
+                var dx = sin(currentAngle) * effSpeed + wind
+                let dy = -cos(currentAngle) * effSpeed
 
                 if settings.mouseEnabled {
                     let globalMouse = NSEvent.mouseLocation
@@ -1097,32 +1097,31 @@ class RainView: MTKView {
                 if raindrops[i].position.y < -1 {
                     if raindrops[i].colorIntensity > 0.85 {
                         createSplash(
-                            at: raindrops[i].position, intensity: raindrops[i].colorIntensity)
+                            at: raindrops[i].position,
+                            intensity: raindrops[i].colorIntensity)
                     }
                     let pos = newDropPosition()
                     let special = Float.random(in: 0...1) < 0.01
-                    let lengthRange = settings.length * 0.5...settings.length * 2.0
-                    let randomLength = Float.random(in: lengthRange)
-                    let normalizedLength =
-                        (randomLength - lengthRange.lowerBound)
-                        / (lengthRange.upperBound - lengthRange.lowerBound)
-                    let colorIntensity = 0.4 + (normalizedLength * 0.6)
+                    let lr = settings.length * 0.5...settings.length * 2.0
+                    let rnd = Float.random(in: lr)
+                    let normLen = (rnd - lr.lowerBound) / (lr.upperBound - lr.lowerBound)
+                    let cInt = 0.4 + (normLen * 0.6)
                     raindrops[i].position = pos
                     raindrops[i].isSpecial = special
-                    raindrops[i].length = randomLength
-                    raindrops[i].colorIntensity = colorIntensity
+                    raindrops[i].length = rnd
+                    raindrops[i].colorIntensity = cInt
                 }
 
                 let dropDir = SIMD2<Float>(sin(currentAngle), -cos(currentAngle))
-                let dropLength = raindrops[i].length * 0.5
-                let dropEnd = raindrops[i].position + dropDir * dropLength
+                let dropLen = raindrops[i].length * 0.5
+                let dropEnd = raindrops[i].position + dropDir * dropLen
                 let dropAlpha = raindrops[i].colorIntensity
                 raindropVertices.append(Vertex(position: raindrops[i].position, alpha: dropAlpha))
                 raindropVertices.append(Vertex(position: dropEnd, alpha: dropAlpha))
 
                 if raindrops[i].isSpecial && raindrops[i].colorIntensity > 0.85 {
-                    let smearLength = raindrops[i].length * settings.smearFactor
-                    let smearEnd = raindrops[i].position + dropDir * smearLength
+                    let smearLen = raindrops[i].length * settings.smearFactor
+                    let smearEnd = raindrops[i].position + dropDir * smearLen
                     let smearAlpha = raindrops[i].colorIntensity * 0.3
                     raindropVertices.append(
                         Vertex(position: raindrops[i].position, alpha: smearAlpha))
@@ -1134,137 +1133,123 @@ class RainView: MTKView {
             splashes.removeAll()
         }
 
-        for i in 0..<splashes.count { splashes[i].update() }
+        // splashes
+        for i in 0..<splashes.count {
+            splashes[i].update()
+        }
         splashes = splashes.filter { $0.life > 0 }
         for splash in splashes {
             let v = splash.velocity
             let mag = simd_length(v)
-            let offset: SIMD2<Float> =
+            let off =
                 (mag > 0.0001)
                 ? (v / mag) * (0.1 * settings.splashIntensity)
                 : SIMD2<Float>(0.1 * settings.splashIntensity, 0.1 * settings.splashIntensity)
             let start = splash.position
-            let end = splash.position + offset
+            let end = splash.position + off
             let a = splash.alpha * settings.splashIntensity
             splashVertices.append(Vertex(position: start, alpha: a))
             splashVertices.append(Vertex(position: end, alpha: a))
         }
 
-        raindropVertices.withUnsafeBytes { bufferPointer in
-            renderEncoder.setVertexBytes(
-                bufferPointer.baseAddress!,
-                length: raindropVertices.count * MemoryLayout<Vertex>.stride,
-                index: 0)
+        // Draw raindrops
+        raindropVertices.withUnsafeBytes { buf in
+            encoder.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
         }
-        renderEncoder.drawPrimitives(
-            type: .line, vertexStart: 0, vertexCount: raindropVertices.count)
-        splashVertices.withUnsafeBytes { bufferPointer in
-            renderEncoder.setVertexBytes(
-                bufferPointer.baseAddress!,
-                length: splashVertices.count * MemoryLayout<Vertex>.stride,
-                index: 0)
-        }
-        renderEncoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: splashVertices.count)
+        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: raindropVertices.count)
 
-        // --- Snow Simulation & Accumulation ---
+        // Draw splashes
+        splashVertices.withUnsafeBytes { buf in
+            encoder.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
+        }
+        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: splashVertices.count)
+
+        // SNOW
         if settings.snowEnabled {
-            let currentTime = CACurrentMediaTime()
-            let deltaTime = Float(currentTime - lastUpdateTime)
-            lastUpdateTime = currentTime
-            simulateAndRenderSnow(deltaTime: deltaTime, renderEncoder: renderEncoder)
+            let now = CACurrentMediaTime()
+            let dt = Float(now - lastUpdateTime)
+            lastUpdateTime = now
+            simulateAndRenderSnow(deltaTime: dt, renderEncoder: encoder)
         }
 
-        renderEncoder.endEncoding()
+        encoder.endEncoding()
         if let drawable = currentDrawable { commandBuffer.present(drawable) }
         commandBuffer.commit()
     }
 
     private var lastUpdateTime: CFTimeInterval = CACurrentMediaTime()
 
-    private func createSplash(at position: SIMD2<Float>, intensity: Float) {
+    private func createSplash(at pos: SIMD2<Float>, intensity: Float) {
         let count = Int.random(in: 3...5)
         for _ in 0..<count {
-            let randomAngle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
+            let angle = Float.random(in: (Float.pi / 6)...(5 * Float.pi / 6))
             let speed = Float.random(in: 0.012...0.024)
-            let vel = SIMD2<Float>(cos(randomAngle) * speed, sin(randomAngle) * speed * 3.0)
+            let vel = SIMD2<Float>(cos(angle) * speed, sin(angle) * speed * 3.0)
             let life = Float.random(in: 0.4...0.8)
-            let splash = Splash(
-                position: position,
-                velocity: vel,
-                life: life,
-                startLife: life,
-                intensity: intensity
-            )
-            splashes.append(splash)
+            let sp = Splash(
+                position: pos, velocity: vel, life: life, startLife: life, intensity: intensity)
+            splashes.append(sp)
         }
     }
 }
 
-// MARK: - Snow Simulation Extension
+// MARK: - Snow Simulation
 
 extension RainView {
-    /// Converts an NSColor to a SIMD4<Float> (assuming deviceRGB).
     private func simd4(from color: NSColor) -> SIMD4<Float> {
-        guard let rgb = color.usingColorSpace(.deviceRGB) else { return SIMD4<Float>(1, 1, 1, 1) }
+        guard let rgb = color.usingColorSpace(.deviceRGB) else {
+            return SIMD4<Float>(1, 1, 1, 1)
+        }
         return SIMD4<Float>(
             Float(rgb.redComponent),
             Float(rgb.greenComponent),
             Float(rgb.blueComponent),
-            Float(rgb.alphaComponent))
+            Float(rgb.alphaComponent)
+        )
     }
 
-    /// Simulates snowflake physics, checks for accumulation collisions, renders active snowflakes,
-    /// and draws a filled accumulation layer.
-    ///
-    /// The algorithm:
-    /// 1. Initialize snowPiles to –1.0 (ground) for each segment.
-    /// 2. Compute windowLevels from non‑system windows.
-    /// 3. For each active snowflake, determine its horizontal segment.
-    /// 4. Compute effectiveThreshold as follows:
-    ///    - If a window is present (windowLevels[segIndex] < 0), use max(snowPiles[segIndex], windowLevels[segIndex]).
-    ///    - Otherwise, use snowPiles[segIndex].
-    /// 5. If the snowflake’s y‑position is below (effectiveThreshold + its size), then increase
-    ///    snowPiles (using a higher rate if on the ground, a lower rate if on a window) but cap it at maxAccumulation,
-    ///    and deactivate the snowflake.
-    /// 6. Spawn new snowflakes if active count is below target.
-    /// 7. Draw active snowflakes, then draw a triangle strip from snowPiles (accumulated snow) to –1 (ground).
-    ///
-    /// - Parameters:
-    ///   - deltaTime: The time elapsed since the last frame.
-    ///   - renderEncoder: The Metal render command encoder.
     func simulateAndRenderSnow(deltaTime: Float, renderEncoder: MTLRenderCommandEncoder) {
         guard let pool = _snowflakePool else { return }
 
-        let windowLevels = computeWindowAccumulationLevels()
+        let windowSegments = computeWindowAccumulationLevels()
 
         var activeCount = 0
         for i in 0..<pool.count {
-            var state = pool[i]
-            if !state.isActive { continue }
+            var st = pool[i]
+            if !st.isActive { continue }
             activeCount += 1
 
-            state.opacity = min(state.opacity + deltaTime * 2.0, 1.0)
-            state.rotation += deltaTime * Float.random(in: 0.5...1.5)
-            state.flake.wobblePhase += deltaTime * 2.0
-            let wobbleOffset = sin(state.flake.wobblePhase) * state.flake.wobbleAmplitude
-            state.flake.position.x += state.flake.velocity.x + wobbleOffset
-            state.flake.position.y += state.flake.velocity.y
+            // Move flake
+            st.opacity = min(st.opacity + deltaTime * 2.0, 1.0)
+            st.rotation += deltaTime * Float.random(in: 0.5...1.5)
+            st.flake.wobblePhase += deltaTime * 2.0
+            let wobble = sin(st.flake.wobblePhase) * st.flake.wobbleAmplitude
+            st.flake.position.x += st.flake.velocity.x + wobble
+            st.flake.position.y += st.flake.velocity.y
 
-            let normalizedX = (state.flake.position.x + 1) / 2
-            let seg = Int(normalizedX * Float(snowPileResolution - 1))
-            let segIndex = max(0, min(snowPileResolution - 1, seg))
-            let windowThreshold = windowLevels[segIndex]
-            // If a low window is present (windowThreshold < 0), use its top; otherwise, use the current accumulation.
-            let effectiveThreshold: Float =
-                (windowThreshold < 0)
-                ? max(snowPiles[segIndex], windowThreshold) : snowPiles[segIndex]
+            let normX = (st.flake.position.x + 1) / 2
+            let segIndex = max(
+                0, min(snowPileResolution - 1, Int(normX * Float(snowPileResolution - 1))))
+            let winTop = windowSegments[segIndex].topY
+            let wID = windowSegments[segIndex].windowID
+            let ground = snowPiles[segIndex]
 
-            if state.flake.position.y <= effectiveThreshold + state.flake.size {
-                // Use a higher accumulation rate for ground and a lower rate for windows.
-                let rate: Float =
-                    (windowThreshold < 0)
-                    ? Float.random(in: 0.05...0.1) : Float.random(in: 0.2...0.3)
-                let deltaAccum = state.flake.size * rate
+            let collisionThreshold = max(winTop, ground)
+
+            // Debug print
+            // If the threshold is above -1, let's see if we collide:
+            if st.flake.position.y <= collisionThreshold + st.flake.size {
+                print(
+                    "Snowflake #\(i) collision at seg=\(segIndex). threshold=\(collisionThreshold)."
+                )
+
+                if winTop > ground, let ww = wID {
+                    print("  -> Hit window #\(ww)! Cycling color.")
+                    cycleColor(forWindow: ww)
+                }
+                // accumulate
+                let rate: Float = 0.1
+                let deltaAccum = st.flake.size * rate
                 snowPiles[segIndex] = min(snowPiles[segIndex] + deltaAccum, maxAccumulation)
                 if segIndex > 0 {
                     snowPiles[segIndex - 1] = min(
@@ -1274,234 +1259,148 @@ extension RainView {
                     snowPiles[segIndex + 1] = min(
                         snowPiles[segIndex + 1] + deltaAccum * 0.5, maxAccumulation)
                 }
-                state.isActive = false
-            } else if state.flake.position.y < -1 {
-                state.isActive = false
+
+                st.isActive = false
+            } else if st.flake.position.y < -1 {
+                // fell below screen
+                st.isActive = false
             }
-            pool[i] = state
+            pool[i] = st
         }
 
-        // Spawn new snowflakes if necessary.
-        let targetActiveSnowflakes = 50
-        if activeCount < targetActiveSnowflakes {
+        // spawn new if needed
+        let target = 10  // fewer for easier debugging
+        if activeCount < target {
             for i in 0..<pool.count {
-                if activeCount >= targetActiveSnowflakes { break }
+                if activeCount >= target { break }
                 if !pool[i].isActive {
-                    let newState = SnowflakeState(
+                    let ns = SnowflakeState(
                         flake: createSnowflake(),
                         opacity: 0.0,
                         rotation: Float.random(in: 0..<(2 * .pi)),
                         isActive: true
                     )
-                    pool[i] = newState
+                    print("Spawning snowflake at index \(i).")
+                    pool[i] = ns
                     activeCount += 1
                 }
             }
         }
 
-        // Build vertex list for active snowflakes.
-        var snowflakeVertices: [Vertex] = []
+        // Build vertex list for active flakes
+        var snowflakeVerts: [Vertex] = []
         for i in 0..<pool.count {
-            let state = pool[i]
-            if !state.isActive { continue }
-            let s = state.flake.size
-            let x = state.flake.position.x
-            let y = state.flake.position.y
-            let rotation = state.rotation
-            let opacity = state.opacity
+            let st2 = pool[i]
+            if !st2.isActive { continue }
+            let s = st2.flake.size
+            let x = st2.flake.position.x
+            let y = st2.flake.position.y
+            let rot = st2.rotation
+            let op = st2.opacity
+
             for j in 0..<6 {
-                let angle = rotation + Float(j) * (.pi / 3)
-                let startX = x + cos(angle) * (s * 0.5)
-                let startY = y + sin(angle) * (s * 0.5)
-                let endX = x - cos(angle) * (s * 0.5)
-                let endY = y - sin(angle) * (s * 0.5)
-                snowflakeVertices.append(
-                    Vertex(position: SIMD2<Float>(startX, startY), alpha: opacity))
-                snowflakeVertices.append(Vertex(position: SIMD2<Float>(endX, endY), alpha: opacity))
+                let angle = rot + Float(j) * (.pi / 3)
+                let sx = x + cos(angle) * (s * 0.5)
+                let sy = y + sin(angle) * (s * 0.5)
+                let ex = x - cos(angle) * (s * 0.5)
+                let ey = y - sin(angle) * (s * 0.5)
+                snowflakeVerts.append(Vertex(position: SIMD2<Float>(sx, sy), alpha: op))
+                snowflakeVerts.append(Vertex(position: SIMD2<Float>(ex, ey), alpha: op))
             }
         }
-
-        if !snowflakeVertices.isEmpty {
-            snowflakeVertices.withUnsafeBytes { bufferPointer in
-                renderEncoder.setVertexBytes(
-                    bufferPointer.baseAddress!,
-                    length: snowflakeVertices.count * MemoryLayout<Vertex>.stride,
-                    index: 0)
+        if !snowflakeVerts.isEmpty {
+            snowflakeVerts.withUnsafeBytes { buf in
+                renderEncoder.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
             }
             renderEncoder.drawPrimitives(
-                type: .line, vertexStart: 0, vertexCount: snowflakeVertices.count)
+                type: .line, vertexStart: 0, vertexCount: snowflakeVerts.count)
         }
 
-        // --- Draw Snow Accumulation Layer ---
-        var accumulationVertices: [Vertex] = []
+        // Accumulation layer
+        var accumVerts: [Vertex] = []
         for i in 0..<snowPileResolution {
-            let x = Float(i) / Float(snowPileResolution - 1) * 2 - 1
+            let x = Float(i) / Float(snowPileResolution - 1) * 2.0 - 1.0
             let y = snowPiles[i]
-            accumulationVertices.append(Vertex(position: SIMD2<Float>(x, y), alpha: 1.0))
-            accumulationVertices.append(Vertex(position: SIMD2<Float>(x, -1), alpha: 1.0))
+            accumVerts.append(Vertex(position: SIMD2<Float>(x, y), alpha: 1.0))
+            accumVerts.append(Vertex(position: SIMD2<Float>(x, -1), alpha: 1.0))
         }
-        var accumulationUniforms = RainUniforms(
+        var accumUniforms = RainUniforms(
             rainColor: SIMD4<Float>(1, 1, 1, 0.9),
             ambientColor: SIMD4<Float>(0, 0, 0, 0))
         renderEncoder.setFragmentBytes(
-            &accumulationUniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
-        if !accumulationVertices.isEmpty {
-            accumulationVertices.withUnsafeBytes { bufferPointer in
-                renderEncoder.setVertexBytes(
-                    bufferPointer.baseAddress!,
-                    length: accumulationVertices.count * MemoryLayout<Vertex>.stride,
-                    index: 0)
+            &accumUniforms,
+            length: MemoryLayout<RainUniforms>.stride,
+            index: 1)
+        if !accumVerts.isEmpty {
+            accumVerts.withUnsafeBytes { buf in
+                renderEncoder.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
             }
             renderEncoder.drawPrimitives(
-                type: .triangleStrip, vertexStart: 0, vertexCount: accumulationVertices.count)
+                type: .triangleStrip, vertexStart: 0, vertexCount: accumVerts.count)
         }
 
-        // DEBUG - Draw lines on top of visible windows to debug this
+        // Debug lines
         if settings.showWindowTops {
             drawVisibleWindowTopsDebug(renderEncoder: renderEncoder)
         }
     }
 
-    private func subtractInterval(_ base: ClosedRange<CGFloat>, _ sub: ClosedRange<CGFloat>)
-        -> [ClosedRange<CGFloat>]
-    {
-        // Compute the intersection.
-        let interLower = max(base.lowerBound, sub.lowerBound)
-        let interUpper = min(base.upperBound, sub.upperBound)
-        if interLower >= interUpper {
-            // No intersection.
-            return [base]
-        }
-        var result: [ClosedRange<CGFloat>] = []
-        if base.lowerBound < interLower {
-            result.append(base.lowerBound...interLower)
-        }
-        if base.upperBound > interUpper {
-            result.append(interUpper...base.upperBound)
-        }
-        return result
-    }
-
-    /// Draws horizontal green debug lines along the visible portions of the tops of windows,
-    /// taking into account occlusions based on z‑ordering.
     private func drawVisibleWindowTopsDebug(renderEncoder: MTLRenderCommandEncoder) {
-        // Get the main screen’s frame.
-        guard let screenFrame = NSScreen.main?.frame,
-            screenFrame.width > 0, screenFrame.height > 0
-        else {
-            return
-        }
-
-        // Retrieve the on‑screen window info in z‑order.
         guard
-            let windowListInfo = CGWindowListCopyWindowInfo(
+            let screenFrame = NSScreen.main?.frame,
+            let windowList = CGWindowListCopyWindowInfo(
                 [.optionOnScreenOnly, .excludeDesktopElements],
-                kCGNullWindowID) as? [[String: Any]]
-        else {
-            return
-        }
+                kCGNullWindowID
+            ) as? [[String: Any]]
+        else { return }
 
-        // Get our own window number so we can filter it out.
-        let myWindowNumber = self.window?.windowNumber
+        let myWindowNum = self.window?.windowNumber
+        for info in windowList {
+            if let owner = info[kCGWindowOwnerName as String] as? String {
+                if owner == "Dock" || owner == "Window Server" { continue }
+            }
 
-        // Build an array of windows (with frame and window number). Note: the dictionary’s
-        // "Y" value is in a top‑left coordinate system.
-        var windows: [(number: Int, frame: CGRect)] = []
-        for info in windowListInfo {
-            // Skip system windows.
-            if let owner = info[kCGWindowOwnerName as String] as? String,
-                owner == "Dock" || owner == "Window Server"
-            {
+            // NEW: Skip overlay windows by layer
+            if let layer = info[kCGWindowLayer as String] as? Int, layer > 0 {
                 continue
             }
-            // Skip our own overlay.
-            if let windowNumber = info[kCGWindowNumber as String] as? Int,
-                let myNum = myWindowNumber, windowNumber == myNum
-            {
+
+            guard
+                let windowNumber = info[kCGWindowNumber as String] as? Int,
+                windowNumber != myWindowNum,
+                let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                let x = bounds["X"] as? CGFloat,
+                let y = bounds["Y"] as? CGFloat,
+                let w = bounds["Width"] as? CGFloat
+                // let h = bounds["Height"] as? CGFloat
+            else {
                 continue
             }
-            if let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
-                let x = boundsDict["X"] as? CGFloat,
-                let y = boundsDict["Y"] as? CGFloat,
-                let width = boundsDict["Width"] as? CGFloat,
-                let height = boundsDict["Height"] as? CGFloat
-            {
-                let frame = CGRect(x: x, y: y, width: width, height: height)
-                windows.append((number: info[kCGWindowNumber as String] as! Int, frame: frame))
-            }
-        }
 
-        // We'll accumulate debug vertices (each line is two vertices).
-        var debugVertices: [Vertex] = []
-
-        // Process each window in z‑order (frontmost window is at index 0).
-        for (i, window) in windows.enumerated() {
-            let frame = window.frame
-
-            // Convert the CGWindowList’s top‑left coordinate to our normalized coordinate:
-            // In CGWindowList, the "Y" value is measured from the top. So the top edge (in our
-            // desired coordinate system) is:
-            let windowTop = screenFrame.height - frame.origin.y
-            // (Do not add frame.height here because frame.origin.y is already the distance from the top.)
-
-            // Our base horizontal interval is the window’s width.
-            let baseInterval: ClosedRange<CGFloat> = frame.origin.x...(frame.origin.x + frame.width)
-            var visibleIntervals: [ClosedRange<CGFloat>] = [baseInterval]
-
-            // Subtract intervals from windows in front (lower indices) that cover this window’s top.
-            // For a front window, its top (in our coordinates) is:
-            //   frontWindowTop = screenFrame.height - frontFrame.origin.y
-            // and its bottom is:
-            //   frontWindowBottom = frontWindowTop - frontFrame.height.
-            for j in 0..<i {
-                let frontFrame = windows[j].frame
-                let frontWindowTop = screenFrame.height - frontFrame.origin.y
-                let frontWindowBottom = frontWindowTop - frontFrame.height
-
-                // The current window’s top (windowTop) is visible if it is not covered by a front window.
-                if windowTop <= frontWindowTop && windowTop >= frontWindowBottom {
-                    let interferingInterval: ClosedRange<CGFloat> =
-                        frontFrame.origin.x...(frontFrame.origin.x + frontFrame.width)
-                    visibleIntervals = visibleIntervals.flatMap {
-                        subtractInterval($0, interferingInterval)
-                    }
-                }
-            }
-
-            // If any horizontal portions remain visible, convert them to normalized coordinates and add debug lines.
-            if !visibleIntervals.isEmpty {
-                let normalizedY = Float((windowTop / screenFrame.height) * 2 - 1)
-                for interval in visibleIntervals {
-                    let normalizedLeft = Float((interval.lowerBound / screenFrame.width) * 2 - 1)
-                    let normalizedRight = Float((interval.upperBound / screenFrame.width) * 2 - 1)
-                    debugVertices.append(
-                        Vertex(position: SIMD2<Float>(normalizedLeft, normalizedY), alpha: 1.0))
-                    debugVertices.append(
-                        Vertex(position: SIMD2<Float>(normalizedRight, normalizedY), alpha: 1.0))
-                }
-            }
-        }
-
-        // Draw the debug lines if any vertices were added.
-        if !debugVertices.isEmpty {
-            var debugUniforms = RainUniforms(
-                rainColor: SIMD4<Float>(0, 1, 0, 1),  // Bright green.
-                ambientColor: SIMD4<Float>(0, 0, 0, 0)
-            )
+            let col = simd4(from: colorForWindowID(windowNumber))
+            var debugUniforms = RainUniforms(rainColor: col, ambientColor: SIMD4<Float>(0, 0, 0, 0))
             renderEncoder.setFragmentBytes(
                 &debugUniforms,
                 length: MemoryLayout<RainUniforms>.stride,
                 index: 1)
-            debugVertices.withUnsafeBytes { bufferPointer in
-                renderEncoder.setVertexBytes(
-                    bufferPointer.baseAddress!,
-                    length: debugVertices.count * MemoryLayout<Vertex>.stride,
-                    index: 0)
+
+            let normTop = Float((1.0 - (y / screenFrame.height)) * 2.0 - 1.0)
+            let normLeft = Float((x / screenFrame.width) * 2.0 - 1.0)
+            let normRight = Float(((x + w) / screenFrame.width) * 2.0 - 1.0)
+
+            var lineVerts: [Vertex] = []
+            lineVerts.append(Vertex(position: SIMD2<Float>(normLeft, normTop), alpha: 1.0))
+            lineVerts.append(Vertex(position: SIMD2<Float>(normRight, normTop), alpha: 1.0))
+
+            lineVerts.withUnsafeBytes { buf in
+                renderEncoder.setVertexBytes(buf.baseAddress!, length: buf.count, index: 0)
             }
             renderEncoder.drawPrimitives(
                 type: .line,
                 vertexStart: 0,
-                vertexCount: debugVertices.count)
+                vertexCount: lineVerts.count)
         }
     }
 }
+
+// MARK: - End
