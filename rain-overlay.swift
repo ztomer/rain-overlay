@@ -890,9 +890,9 @@ class RainView: MTKView {
 
     func createSnowflake() -> Snowflake {
         let x = Float.random(in: -0.5...0.5)
-        let y: Float = 1.1
+        let y: Float = Float.random(in: 0.9...1.1)  // Start closer to or at screen top
         let size: Float = Float.random(in: 0.01...0.02)
-        let vy = -Float.random(in: 0.001...0.003)
+        let vy = -Float.random(in: 0.005...0.015)  // Slightly faster, still gentle
         let vx = Float.random(in: -0.0005...0.0005)
         let wobblePhase = Float.random(in: 0..<(2 * .pi))
         let wobbleAmplitude = Float.random(in: 0.0001...0.0003)
@@ -1005,8 +1005,8 @@ class RainView: MTKView {
                 st.rotation += deltaTime * Float.random(in: 0.5...1.5)
                 st.flake.wobblePhase += deltaTime * 2.0
                 let wobble = sin(st.flake.wobblePhase) * st.flake.wobbleAmplitude
-                st.flake.position.x += st.flake.velocity.x + wobble
-                st.flake.position.y += st.flake.velocity.y
+                st.flake.position.x += st.flake.velocity.x * deltaTime + wobble
+                st.flake.position.y += st.flake.velocity.y * deltaTime
 
                 // Convert normalized snowflake position to screen coordinates (Cocoa)
                 let flakeScreenX = (st.flake.position.x + 1) * 0.5 * screenW
