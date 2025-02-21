@@ -63,7 +63,7 @@ struct RainSettings: Codable {
     var snowEnabled: Bool
     var snowAccumulationThreshold: Float
     var showWindowTops: Bool
-    var accumulationRate: Float = 5.0  // Default to 10% of original rate
+    var accumulationRate: Float = 0.1  // Default to 10% of original rate
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity,
@@ -92,7 +92,7 @@ struct RainSettings: Codable {
         snowEnabled: Bool = false,
         snowAccumulationThreshold: Float = -1.0,
         showWindowTops: Bool = true,
-        accumulationRate: Float = 5.0
+        accumulationRate: Float = 0.1
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -895,18 +895,39 @@ class RainView: MTKView {
     // MARK: - Snowflake Creation
 
     func createSnowflake() -> Snowflake {
-        let x = Float.random(in: -0.5...0.5)
-        let y: Float = Float.random(in: 0.9...1.1)  // Start closer to or at screen top
-        let size: Float = Float.random(in: 0.01...0.02)
-        let vy = -Float.random(in: 0.005...0.015)  // Slightly faster, still gentle
-        let vx = Float.random(in: -0.0005...0.0005)
-        let wobblePhase = Float.random(in: 0..<(2 * .pi))
-        let wobbleAmplitude = Float.random(in: 0.0001...0.0003)
-        if DEBUG_MODE {
-            print("DEBUG: Creating new snowflake at (\(x), \(y)), size=\(size)")
+        guard let screen = NSScreen.main else {
+            // Fallback values if screen isn’t available
+            return Snowflake(
+                position: SIMD2<Float>(0, 1),
+                velocity: SIMD2<Float>(0, -0.01),
+                size: 0.015,
+                wobblePhase: 0,
+                wobbleAmplitude: 0.001
+            )
         }
+
+        let screenW = Float(screen.frame.width)  // e.g., 3360
+        //let screenH = Float(screen.frame.height)  // e.g., 1890
+
+        // a. Slower fall speed: gentler descent
+        let vy = -Float.random(in: 0.002...0.006)  // Was 0.005...0.015
+
+        // b. Smaller, screen-scaled size
+        let baseSize = screenW / 3360.0  // Normalize to a reference width (3360)
+        let size = Float.random(in: 0.005...0.012) * baseSize  // Scaled, smaller range
+
+        // c. Delightful touches
+        let x = Float.random(in: -1.0...1.0)  // Full width spawn (already good)
+        let vx = Float.random(in: -0.002...0.002)  // Slight horizontal drift
+        let wobblePhase = Float.random(in: 0..<(2 * .pi))
+        let wobbleAmplitude = Float.random(in: 0.0008...0.002) * baseSize  // Scaled wobble
+
+        if DEBUG_MODE {
+            print("DEBUG: Creating snowflake at (x: \(x), y: 0.9...1.1), size=\(size), vy=\(vy)")
+        }
+
         return Snowflake(
-            position: SIMD2<Float>(x, y),
+            position: SIMD2<Float>(x, Float.random(in: 0.9...1.1)),  // Above or at top
             velocity: SIMD2<Float>(vx, vy),
             size: size,
             wobblePhase: wobblePhase,
