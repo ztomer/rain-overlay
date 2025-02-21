@@ -63,12 +63,12 @@ struct RainSettings: Codable {
     var snowEnabled: Bool
     var snowAccumulationThreshold: Float
     var showWindowTops: Bool
-    var accumulationRate: Float = 0.1  // Default to 10% of original rate
+    var accumulationRate: Float = 5.0  // Default to 10% of original rate
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity,
             windEnabled, windIntensity, mouseEnabled, mouseInfluenceIntensity, maxFPS,
-            rainEnabled, snowEnabled, snowAccumulationThreshold, showWindowTops
+            rainEnabled, snowEnabled, snowAccumulationThreshold, showWindowTops, accumulationRate
     }
 
     struct ColorComponents: Codable {
@@ -92,7 +92,7 @@ struct RainSettings: Codable {
         snowEnabled: Bool = false,
         snowAccumulationThreshold: Float = -1.0,
         showWindowTops: Bool = true,
-        accumulationRate: Float = 0.1
+        accumulationRate: Float = 5.0
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -135,6 +135,7 @@ struct RainSettings: Codable {
         color = NSColor(
             calibratedRed: comps.red, green: comps.green, blue: comps.blue, alpha: comps.alpha)
         showWindowTops = try c.decodeIfPresent(Bool.self, forKey: .showWindowTops) ?? false
+        accumulationRate = try c.decodeIfPresent(Float.self, forKey: .accumulationRate) ?? 0.1
     }
 
     func encode(to encoder: Encoder) throws {
@@ -164,6 +165,7 @@ struct RainSettings: Codable {
         let comps = ColorComponents(red: red, green: green, blue: blue, alpha: alpha)
         try c.encode(comps, forKey: .color)
         try c.encode(showWindowTops, forKey: .showWindowTops)
+        try c.encode(accumulationRate, forKey: .accumulationRate)
     }
 }
 
@@ -635,16 +637,17 @@ struct SnowflakeState {
 /// Holds per-window snow data.
 private struct WindowSnow {
     var windowID: Int
-    var bounds: CGRect  // In Cocoa coordinates (origin at bottom‑left)
+    var bounds: CGRect
     let resolution: Int
-    // accumOffsets[i] = how much snow (in pixels) has accumulated at segment i.
     var accumOffsets: [Float]
+    var layer: Int  // Add layer for z-order
 
-    init(windowID: Int, bounds: CGRect, resolution: Int) {
+    init(windowID: Int, bounds: CGRect, resolution: Int, layer: Int) {
         self.windowID = windowID
         self.bounds = bounds
         self.resolution = resolution
         self.accumOffsets = [Float](repeating: 0.0, count: resolution)
+        self.layer = layer
     }
 }
 
@@ -913,26 +916,26 @@ class RainView: MTKView {
 
     // MARK: - Window Snow Map Update
     private func refreshWindowSnowMap() {
-        guard
-            let screen = NSScreen.main,
+        guard let screen = NSScreen.main,
             let windowListInfo = CGWindowListCopyWindowInfo(
                 [.optionOnScreenOnly, .excludeDesktopElements],
                 kCGNullWindowID
             ) as? [[String: Any]]
         else { return }
+
         let screenH = screen.frame.height
         let myWindowNum = self.window?.windowNumber
-        var stillVisible = Set<Int>()
+        var newWindowSnowMap: [Int: WindowSnow] = [:]
+
+        // Process current windows
         for info in windowListInfo {
             if let owner = info[kCGWindowOwnerName as String] as? String,
                 owner == "Dock" || owner == "Window Server"
             {
                 continue
             }
-            if let layer = info[kCGWindowLayer as String] as? Int, layer > 0 {
-                continue
-            }
-            guard
+            guard let layer = info[kCGWindowLayer as String] as? Int,
+                layer == 0,  // Only base layer windows for now
                 let windowNumber = info[kCGWindowNumber as String] as? Int,
                 windowNumber != myWindowNum,
                 let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
@@ -941,30 +944,30 @@ class RainView: MTKView {
                 let w = boundsDict["Width"] as? CGFloat,
                 let h = boundsDict["Height"] as? CGFloat
             else { continue }
+
             let cocoaY = screenH - y - h
             let rect = CGRect(x: x, y: cocoaY, width: w, height: h)
-            stillVisible.insert(windowNumber)
-            if windowSnowMap[windowNumber] == nil {
-                let newSnow = WindowSnow(
-                    windowID: windowNumber, bounds: rect, resolution: snowResolution)
-                windowSnowMap[windowNumber] = newSnow
+
+            // Check if window exists and hasn’t changed
+            if let existingSnow = windowSnowMap[windowNumber],
+                existingSnow.bounds == rect && existingSnow.layer == layer
+            {
+                // Reuse existing WindowSnow to preserve accumOffsets
+                newWindowSnowMap[windowNumber] = existingSnow
             } else {
-                windowSnowMap[windowNumber]?.bounds = rect
-            }
-            if DEBUG_MODE {
-                print("DEBUG: Window \(windowNumber) bounds (Cocoa): \(rect)")
-            }
-        }
-        for (winID, _) in windowSnowMap {
-            if !stillVisible.contains(winID) {
-                windowSnowMap.removeValue(forKey: winID)
+                // Window is new or changed; create new instance
+                let newSnow = WindowSnow(
+                    windowID: windowNumber, bounds: rect, resolution: snowResolution, layer: layer)
+                newWindowSnowMap[windowNumber] = newSnow
             }
         }
+
+        // Update the map (implicitly removes windows that are no longer visible)
+        windowSnowMap = newWindowSnowMap
+
         if DEBUG_MODE {
             print("DEBUG: Refreshed window nodes. Count: \(windowSnowMap.count)")
-            if let screen = NSScreen.main {
-                print("DEBUG: Screen dimensions: \(screen.frame)")
-            }
+            print("DEBUG: Screen dimensions: \(screen.frame)")
         }
     }
 
@@ -981,25 +984,7 @@ class RainView: MTKView {
         let targetFlakes = 30
         var activeCount = 0
 
-        // Process each snowflake via the debug function.
-        // Make a mutable copy:
-        var mutablePool = pool
-        for i in 0..<mutablePool.count {
-            let snowflake = mutablePool[i]
-
-            // Compute the snowflake's screen coordinates.
-            // Replace these with your actual computations.
-            let flakeScreenX = computeScreenX(for: snowflake, screenWidth: screenW)
-            let flakeScreenY = computeScreenY(for: snowflake, screenHeight: screenH)
-
-            debugSnowflakeScreenPosition(
-                index: i, flakeX: flakeScreenX, flakeY: flakeScreenY, screenWidth: screenW,
-                screenHeight: screenH)
-
-            debugProcessSnowflake(
-                at: i, pool: &mutablePool, screenW: screenW, screenH: screenH, deltaTime: deltaTime)
-        }
-
+        // Process each snowflake
         for i in 0..<pool.count {
             var st = pool[i]
             if st.isActive {
@@ -1008,15 +993,20 @@ class RainView: MTKView {
                 st.rotation += deltaTime * Float.random(in: 0.5...1.5)
                 st.flake.wobblePhase += deltaTime * 2.0
                 let wobble = sin(st.flake.wobblePhase) * st.flake.wobbleAmplitude
-                st.flake.position.x += st.flake.velocity.x * deltaTime + wobble
-                st.flake.position.y += st.flake.velocity.y * deltaTime
+                st.flake.position.x += st.flake.velocity.x + wobble
+                st.flake.position.y += st.flake.velocity.y
 
                 // Convert normalized snowflake position to screen coordinates (Cocoa)
                 let flakeScreenX = (st.flake.position.x + 1) * 0.5 * screenW
                 let flakeScreenY = (st.flake.position.y + 1) * 0.5 * screenH
+                if DEBUG_MODE {
+                    print("DEBUG: Snowflake \(i) at (x: \(flakeScreenX), y: \(flakeScreenY))")
+                }
 
-                // Check collision against each window's top.
-                for (winID, wSnow) in windowSnowMap {
+                // Check collision against windows in z-order (frontmost first)
+                let sortedWindows = windowSnowMap.sorted { $0.value.layer < $1.value.layer }
+                var collisionOccurred = false
+                for (winID, wSnow) in sortedWindows {
                     let wb = wSnow.bounds
                     if flakeScreenX >= Float(wb.origin.x)
                         && flakeScreenX <= Float(wb.origin.x + wb.width)
@@ -1026,47 +1016,51 @@ class RainView: MTKView {
                         let segIndex = max(
                             0, min(wSnow.resolution - 1, Int(fraction * Float(wSnow.resolution))))
                         let currentSnowOffset = wSnow.accumOffsets[segIndex]
+                        let segScreenYTop = windowTopY + currentSnowOffset
+                        let collisionRangeMax = segScreenYTop + st.flake.size * 2.0 * (screenH / 2)
                         if DEBUG_MODE {
                             print(
-                                "DEBUG: Window \(winID) seg \(segIndex): segScreenX=\(flakeScreenX), windowTop=\(windowTopY), accum=\(currentSnowOffset)"
+                                "DEBUG: Window \(winID) seg \(segIndex): segScreenX=\(flakeScreenX), windowTop=\(windowTopY), accum=\(currentSnowOffset), range=\(windowTopY) to \(collisionRangeMax)"
                             )
                         }
-                        // Compute normalized Y for the top of accumulation.
-                        let segScreenYTop = windowTopY + currentSnowOffset
-                        let normYTop = (segScreenYTop / screenH) * 2.0 - 1.0
-                        if normYTop > 1 || normYTop < -1 {
+                        // Collision check
+                        if flakeScreenY >= windowTopY && flakeScreenY <= collisionRangeMax {
                             if DEBUG_MODE {
-                                print(
-                                    "DEBUG: Window \(winID) seg \(segIndex) is off-screen (normYTop=\(normYTop))"
-                                )
-                            }
-                        }
-                        // Updated collision check: convert flake size to pixels.
-                        if flakeScreenY >= windowTopY
-                            && flakeScreenY
-                                <= (windowTopY + currentSnowOffset + st.flake.size * 2.0
-                                    * (screenH / 2))
-                        {
-                            if DEBUG_MODE {
+                                cycleColor(forWindow: winID)
                                 print(
                                     "DEBUG: Snowflake \(i) collided with window \(winID) at seg \(segIndex) (flakeY=\(flakeScreenY))"
                                 )
-                                cycleColor(forWindow: winID)
                             }
-                            let growth =
-                                st.flake.size * 0.5 * (screenH / 2) * settings.accumulationRate
+                            let accumulationRate = settings.accumulationRate
+                            let growth = st.flake.size * 0.5 * (screenH / 2) * accumulationRate
+                            if DEBUG_MODE {
+                                print(
+                                    "DEBUG: Applying growth=\(growth) to window \(winID) seg \(segIndex)"
+                                )
+                            }
                             windowSnowMap[winID]?.accumOffsets[segIndex] += growth
                             st.isActive = false
-                            break
+                            collisionOccurred = true
+                            break  // Stop at the frontmost window
+                        } else if DEBUG_MODE {
+                            print(
+                                "DEBUG: No collision for snowflake \(i) with window \(winID): flakeY=\(flakeScreenY) not in range \(windowTopY) to \(collisionRangeMax)"
+                            )
                         }
                     }
                 }
-                if flakeScreenY < 0 || flakeScreenY > screenH + 50 {
+                // Deactivate snowflakes that fall off-screen
+                if !collisionOccurred && (flakeScreenY < 0 || flakeScreenY > screenH + 50) {
                     st.isActive = false
+                    if DEBUG_MODE {
+                        print("DEBUG: Snowflake \(i) deactivated (off-screen)")
+                    }
                 }
             }
             pool[i] = st
         }
+
+        // Spawn new snowflakes if below target
         if activeCount < targetFlakes {
             for i in 0..<pool.count where activeCount < targetFlakes {
                 if !pool[i].isActive {
@@ -1080,6 +1074,8 @@ class RainView: MTKView {
                 }
             }
         }
+
+        // Render snowflakes
         var snowflakeVerts: [Vertex] = []
         for i in 0..<pool.count {
             let st2 = pool[i]
@@ -1106,11 +1102,12 @@ class RainView: MTKView {
             renderEncoder.drawPrimitives(
                 type: .line, vertexStart: 0, vertexCount: snowflakeVerts.count)
         }
+
+        // Draw accumulated snow
         drawAccumulatedSnow(
             renderEncoder: renderEncoder, screenW: screenW, screenH: screenH,
             screenFrame: screen.frame)
     }
-
     // MARK: - Drawing Accumulated Snow
     private func drawAccumulatedSnow(
         renderEncoder: MTLRenderCommandEncoder, screenW: Float, screenH: Float, screenFrame: CGRect
@@ -1120,11 +1117,12 @@ class RainView: MTKView {
             if DEBUG_MODE && settings.showWindowTops {
                 col = simd4(from: colorForWindowID(winID))
             } else {
-                col = simd4(from: settings.color)  // Use the user-defined color (e.g., white)
+                col = simd4(from: settings.color)
             }
             var debugUniforms = RainUniforms(rainColor: col, ambientColor: SIMD4<Float>(0, 0, 0, 0))
             renderEncoder.setFragmentBytes(
                 &debugUniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
+
             let wb = wSnow.bounds
             let windowTopY = Float(wb.origin.y + wb.height)
             let leftX = Float(wb.origin.x)
