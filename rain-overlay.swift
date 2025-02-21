@@ -63,6 +63,7 @@ struct RainSettings: Codable {
     var snowEnabled: Bool
     var snowAccumulationThreshold: Float
     var showWindowTops: Bool
+    var accumulationRate: Float = 0.1  // Default to 10% of original rate
 
     enum CodingKeys: String, CodingKey {
         case numberOfDrops, speed, angle, color, length, smearFactor, splashIntensity,
@@ -90,7 +91,8 @@ struct RainSettings: Codable {
         rainEnabled: Bool = true,
         snowEnabled: Bool = false,
         snowAccumulationThreshold: Float = -1.0,
-        showWindowTops: Bool = true
+        showWindowTops: Bool = true,
+        accumulationRate: Float = 0.1
     ) {
         self.numberOfDrops = numberOfDrops
         self.speed = speed
@@ -108,6 +110,7 @@ struct RainSettings: Codable {
         self.snowEnabled = snowEnabled
         self.snowAccumulationThreshold = snowAccumulationThreshold
         self.showWindowTops = showWindowTops
+        self.accumulationRate = accumulationRate
     }
 
     init(from decoder: Decoder) throws {
@@ -1048,9 +1051,10 @@ class RainView: MTKView {
                                 print(
                                     "DEBUG: Snowflake \(i) collided with window \(winID) at seg \(segIndex) (flakeY=\(flakeScreenY))"
                                 )
+                                cycleColor(forWindow: winID)
                             }
-                            cycleColor(forWindow: winID)
-                            let growth = st.flake.size * 0.5 * (screenH / 2)
+                            let growth =
+                                st.flake.size * 0.5 * (screenH / 2) * settings.accumulationRate
                             windowSnowMap[winID]?.accumOffsets[segIndex] += growth
                             st.isActive = false
                             break
@@ -1112,7 +1116,12 @@ class RainView: MTKView {
         renderEncoder: MTLRenderCommandEncoder, screenW: Float, screenH: Float, screenFrame: CGRect
     ) {
         for (winID, wSnow) in windowSnowMap {
-            let col = simd4(from: colorForWindowID(winID))
+            let col: SIMD4<Float>
+            if DEBUG_MODE && settings.showWindowTops {
+                col = simd4(from: colorForWindowID(winID))
+            } else {
+                col = simd4(from: settings.color)  // Use the user-defined color (e.g., white)
+            }
             var debugUniforms = RainUniforms(rainColor: col, ambientColor: SIMD4<Float>(0, 0, 0, 0))
             renderEncoder.setFragmentBytes(
                 &debugUniforms, length: MemoryLayout<RainUniforms>.stride, index: 1)
