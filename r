@@ -1,0 +1,1 @@
+OS_ACTIVITY_MODE=disable ./RainOverlayApp
