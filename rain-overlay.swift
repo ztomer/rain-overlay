@@ -1293,6 +1293,17 @@ class RainView: MTKView {
                 "DEBUG: Drawing frame at \(CACurrentMediaTime()). Raindrops count: \(raindrops.count)"
             )
         }
+        if DEBUG_MODE {
+            let visibleZones = computeVisibleCollisionZones()
+            print("DEBUG: Visible collision zones per window:")
+            for (winID, intervals) in visibleZones {
+                for interval in intervals {
+                    print(
+                        "    Window \(winID): visible from x=\(interval.lowerBound) to x=\(interval.upperBound)"
+                    )
+                }
+            }
+        }
         refreshWindowSnowMap()
         updateEnvironment()
 
@@ -1500,6 +1511,90 @@ class RainView: MTKView {
 
     func computeScreenY(for snowflake: SnowflakeState, screenHeight: Float) -> Float {
         return snowflake.flake.position.y * screenHeight
+    }
+
+    // Helper: subtract a set of disjoint intervals (already unioned & sorted)
+    // from a given base interval.
+    private func subtractIntervals(_ base: ClosedRange<Float>, from intervals: [ClosedRange<Float>])
+        -> [ClosedRange<Float>]
+    {
+        var result: [ClosedRange<Float>] = []
+        var currentStart = base.lowerBound
+        let end = base.upperBound
+
+        // Assume intervals are already sorted and disjoint.
+        for interval in intervals {
+            // If the interval is completely before the current start, skip.
+            if interval.upperBound < currentStart {
+                continue
+            }
+            // If the interval starts after the end, we're done.
+            if interval.lowerBound > end {
+                break
+            }
+            // If there is a gap between currentStart and the beginning of this interval,
+            // that gap is visible.
+            if interval.lowerBound > currentStart {
+                result.append(currentStart...min(interval.lowerBound, end))
+            }
+            // Move currentStart to the end of the overlapping interval.
+            currentStart = max(currentStart, interval.upperBound)
+            if currentStart >= end {
+                break
+            }
+        }
+        // Any remaining portion at the end is visible.
+        if currentStart < end {
+            result.append(currentStart...end)
+        }
+        return result
+    }
+
+    // Helper: take an array of intervals and merge any overlapping ones.
+    private func unionIntervals(_ intervals: [ClosedRange<Float>]) -> [ClosedRange<Float>] {
+        guard !intervals.isEmpty else { return [] }
+        let sorted = intervals.sorted { $0.lowerBound < $1.lowerBound }
+        var result: [ClosedRange<Float>] = []
+        var current = sorted[0]
+        for interval in sorted.dropFirst() {
+            if interval.lowerBound <= current.upperBound {
+                current = current.lowerBound...max(current.upperBound, interval.upperBound)
+            } else {
+                result.append(current)
+                current = interval
+            }
+        }
+        result.append(current)
+        return result
+    }
+
+    // Compute visible collision zones for window tops.
+    // The result is a mapping from windowID to an array of x-intervals (in screen coordinates)
+    // that are visible (i.e. not occluded by any window in front).
+    func computeVisibleCollisionZones() -> [Int: [ClosedRange<Float>]] {
+        var zones: [Int: [ClosedRange<Float>]] = [:]
+
+        // Sort windows by zOrder ascending (frontmost first).
+        let sortedWindows = windowSnowMap.sorted { $0.value.zOrder < $1.value.zOrder }
+
+        // This will accumulate the full intervals (of all front windows)
+        // that occlude the background.
+        var occlusionUnion: [ClosedRange<Float>] = []
+
+        for (windowID, wSnow) in sortedWindows {
+            let leftX = Float(wSnow.bounds.origin.x)
+            let rightX = Float(wSnow.bounds.origin.x + wSnow.bounds.width)
+            let windowInterval: ClosedRange<Float> = leftX...rightX
+
+            // Subtract occluded portions from the full interval.
+            let visibleIntervals = subtractIntervals(windowInterval, from: occlusionUnion)
+            zones[windowID] = visibleIntervals
+
+            // For occlusion purposes, even if part of a window is hidden,
+            // the entire top still covers the area behind it.
+            occlusionUnion = unionIntervals(occlusionUnion + [windowInterval])
+        }
+        return zones
     }
 }
 
