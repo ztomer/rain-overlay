@@ -640,14 +640,16 @@ private struct WindowSnow {
     var bounds: CGRect
     let resolution: Int
     var accumOffsets: [Float]
-    var layer: Int  // Add layer for z-order
+    var layer: Int  // already filtered to 0
+    var zOrder: Int  // new property to capture actual z‑order
 
-    init(windowID: Int, bounds: CGRect, resolution: Int, layer: Int) {
+    init(windowID: Int, bounds: CGRect, resolution: Int, layer: Int, zOrder: Int) {
         self.windowID = windowID
         self.bounds = bounds
         self.resolution = resolution
         self.accumOffsets = [Float](repeating: 0.0, count: resolution)
         self.layer = layer
+        self.zOrder = zOrder
     }
 }
 
@@ -939,16 +941,16 @@ class RainView: MTKView {
     private func refreshWindowSnowMap() {
         guard let screen = NSScreen.main,
             let windowListInfo = CGWindowListCopyWindowInfo(
-                [.optionOnScreenOnly, .excludeDesktopElements],
-                kCGNullWindowID
-            ) as? [[String: Any]]
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else { return }
 
         let screenH = screen.frame.height
         let myWindowNum = self.window?.windowNumber
         var newWindowSnowMap: [Int: WindowSnow] = [:]
 
-        // Process current windows
+        // Local counter to assign zOrder only for filtered windows.
+        var zOrderCounter = 0
+
         for info in windowListInfo {
             if let owner = info[kCGWindowOwnerName as String] as? String,
                 owner == "Dock" || owner == "Window Server"
@@ -956,7 +958,7 @@ class RainView: MTKView {
                 continue
             }
             guard let layer = info[kCGWindowLayer as String] as? Int,
-                layer == 0,  // Only base layer windows for now
+                layer == 0,  // Keep filtering to layer 0 windows
                 let windowNumber = info[kCGWindowNumber as String] as? Int,
                 windowNumber != myWindowNum,
                 let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
@@ -969,26 +971,37 @@ class RainView: MTKView {
             let cocoaY = screenH - y - h
             let rect = CGRect(x: x, y: cocoaY, width: w, height: h)
 
-            // Check if window exists and hasn’t changed
+            // Reuse existing WindowSnow if unchanged.
             if let existingSnow = windowSnowMap[windowNumber],
                 existingSnow.bounds == rect && existingSnow.layer == layer
             {
-                // Reuse existing WindowSnow to preserve accumOffsets
                 newWindowSnowMap[windowNumber] = existingSnow
+                if DEBUG_MODE {
+                    print(
+                        "DEBUG: Reusing WindowSnow for window \(windowNumber) with zOrder \(existingSnow.zOrder), bounds: \(rect)"
+                    )
+                }
             } else {
-                // Window is new or changed; create new instance
                 let newSnow = WindowSnow(
-                    windowID: windowNumber, bounds: rect, resolution: snowResolution, layer: layer)
+                    windowID: windowNumber, bounds: rect, resolution: snowResolution, layer: layer,
+                    zOrder: zOrderCounter)
                 newWindowSnowMap[windowNumber] = newSnow
+                if DEBUG_MODE {
+                    print(
+                        "DEBUG: New WindowSnow for window \(windowNumber) with zOrder \(zOrderCounter), bounds: \(rect)"
+                    )
+                }
             }
+            zOrderCounter += 1
         }
 
-        // Update the map (implicitly removes windows that are no longer visible)
         windowSnowMap = newWindowSnowMap
 
         if DEBUG_MODE {
             print("DEBUG: Refreshed window nodes. Count: \(windowSnowMap.count)")
-            print("DEBUG: Screen dimensions: \(screen.frame)")
+            for (_, ws) in windowSnowMap {
+                print("DEBUG: Window \(ws.windowID) - zOrder: \(ws.zOrder), bounds: \(ws.bounds)")
+            }
         }
     }
 
@@ -1026,6 +1039,12 @@ class RainView: MTKView {
 
                 // Check collision against windows in z-order (frontmost first)
                 let sortedWindows = windowSnowMap.sorted { $0.value.layer < $1.value.layer }
+                if DEBUG_MODE {
+                    print("DEBUG: Sorted window order for collision detection:")
+                    for (winID, wSnow) in sortedWindows {
+                        print("    Window \(winID): zOrder \(wSnow.zOrder), bounds \(wSnow.bounds)")
+                    }
+                }
                 var collisionOccurred = false
                 for (winID, wSnow) in sortedWindows {
                     let wb = wSnow.bounds
